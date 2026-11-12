@@ -1,10 +1,13 @@
 import { create } from 'zustand'
 import {
   createSession,
+  deleteSession,
+  exportSession,
   getSession,
   getWorkspaces,
   listSessions,
   openWorkspace as openWorkspaceApi,
+  patchSession,
   pickWorkspace,
   streamTurn,
   type SessionMeta,
@@ -48,6 +51,10 @@ interface AppState {
   loadSession: (id: string) => Promise<void>
   send: (input: string) => Promise<void>
   cancel: () => void
+  rename: (id: string, title: string) => Promise<void>
+  setStatus: (id: string, status: SessionMeta['status']) => Promise<void>
+  remove: (id: string) => Promise<void>
+  exportMarkdown: (id: string) => Promise<string>
 }
 
 function messageOf(error: unknown): string {
@@ -246,5 +253,62 @@ export const useApp = create<AppState>((set, get) => ({
   cancel: () => {
     get().abort?.abort()
     set({ streaming: false, abort: null })
+  },
+
+  rename: async (id, title) => {
+    const workspace = get().currentWorkspace
+    if (!workspace) return
+    try {
+      const meta = await patchSession(workspace, id, { title })
+      set({
+        sessions: get().sessions.map((session) => (session.id === id ? meta : session)),
+        meta: get().meta?.id === id ? meta : get().meta,
+        error: null,
+      })
+    } catch (e) {
+      set({ error: messageOf(e) })
+      throw e
+    }
+  },
+
+  setStatus: async (id, status) => {
+    const workspace = get().currentWorkspace
+    if (!workspace) return
+    try {
+      const meta = await patchSession(workspace, id, { status })
+      set({
+        sessions: get().sessions.map((session) => (session.id === id ? meta : session)),
+        meta: get().meta?.id === id ? meta : get().meta,
+        error: null,
+      })
+    } catch (e) {
+      set({ error: messageOf(e) })
+      throw e
+    }
+  },
+
+  remove: async (id) => {
+    const workspace = get().currentWorkspace
+    if (!workspace) return
+    try {
+      await deleteSession(workspace, id)
+      const sessions = get().sessions.filter((session) => session.id !== id)
+      if (get().currentId === id) {
+        const next = sessions[0]?.id ?? null
+        set({ sessions, currentId: next, meta: null, messages: [], gameState: null, options: [], error: null })
+        if (next) await get().loadSession(next)
+      } else {
+        set({ sessions, error: null })
+      }
+    } catch (e) {
+      set({ error: messageOf(e) })
+      throw e
+    }
+  },
+
+  exportMarkdown: (id) => {
+    const workspace = get().currentWorkspace
+    if (!workspace) return Promise.reject(new Error('先打开一个工作区'))
+    return exportSession(workspace, id)
   },
 }))

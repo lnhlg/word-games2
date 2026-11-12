@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import type { SessionMeta } from './api'
 import { useApp, type ToolCard } from './store'
 import type { MessageRecord } from './types'
 
@@ -153,12 +154,19 @@ export default function App() {
     select,
     send,
     cancel,
+    rename,
+    setStatus,
+    remove,
+    exportMarkdown,
   } = useApp()
 
   const current = sessions.find((session) => session.id === currentId) ?? null
   const workspace = workspaces.find((w) => w.path === currentWorkspace) ?? null
   const [pickerOpen, setPickerOpen] = useState(false)
   const [draft, setDraft] = useState('')
+  const [menuFor, setMenuFor] = useState<string | null>(null)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editingTitle, setEditingTitle] = useState('')
 
   useEffect(() => {
     void load()
@@ -182,9 +190,60 @@ export default function App() {
     return []
   }, [messages, options])
 
+  useEffect(() => {
+    if (!menuFor) return
+    const close = () => setMenuFor(null)
+    document.addEventListener('click', close)
+    return () => document.removeEventListener('click', close)
+  }, [menuFor])
+
   async function handlePick() {
     await pick()
     setPickerOpen(false)
+  }
+
+  function startRename(session: SessionMeta) {
+    setEditingId(session.id)
+    setEditingTitle(session.title)
+    setMenuFor(null)
+  }
+
+  async function commitRename(id: string) {
+    const title = editingTitle.trim()
+    setEditingId(null)
+    if (!title) return
+    try {
+      await rename(id, title)
+    } catch {
+      // 错误已进 store 的 error
+    }
+  }
+
+  async function download(session: SessionMeta) {
+    setMenuFor(null)
+    try {
+      const markdown = await exportMarkdown(session.id)
+      const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `${session.title}.md`
+      anchor.click()
+      URL.revokeObjectURL(url)
+    } catch {
+      // 错误已进 store 的 error
+    }
+  }
+
+  async function toggleEnded(session: SessionMeta) {
+    setMenuFor(null)
+    await setStatus(session.id, session.status === 'ended' ? 'active' : 'ended')
+  }
+
+  async function confirmRemove(session: SessionMeta) {
+    setMenuFor(null)
+    if (!window.confirm(`删除「${session.title}」？整个会话文件夹会被移除，无法撤销。`)) return
+    await remove(session.id)
   }
 
   async function handleSubmit(event: FormEvent) {
@@ -283,21 +342,89 @@ export default function App() {
           <ul className="space-y-1">
             {sessions.map((session) => {
               const active = session.id === currentId
+              const editing = editingId === session.id
               return (
-                <li key={session.id}>
+                <li key={session.id} className="group relative">
+                  {editing ? (
+                    <div className="rounded-md border border-neutral-300 px-2.5 py-2">
+                      <input
+                        autoFocus
+                        value={editingTitle}
+                        onChange={(event) => setEditingTitle(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') void commitRename(session.id)
+                          if (event.key === 'Escape') setEditingId(null)
+                        }}
+                        onBlur={() => void commitRename(session.id)}
+                        className="w-full rounded border border-neutral-200 px-1.5 py-1 text-sm outline-none focus:border-neutral-400"
+                      />
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => select(session.id)}
+                      className={`w-full rounded-md px-2.5 py-2 pr-8 text-left transition-colors ${
+                        active ? 'bg-neutral-100' : 'hover:bg-neutral-50'
+                      }`}
+                    >
+                      <span
+                        className={`block truncate text-sm ${
+                          session.status === 'ended' ? 'text-neutral-400' : ''
+                        }`}
+                      >
+                        {session.title}
+                      </span>
+                      <span className="mt-0.5 block text-xs text-neutral-500">
+                        回合 {session.turn} · {relativeTime(session.updatedAt)}
+                        {session.status === 'ended' && ' · 已结束'}
+                      </span>
+                    </button>
+                  )}
+
                   <button
                     type="button"
-                    onClick={() => select(session.id)}
-                    className={`w-full rounded-md px-2.5 py-2 text-left transition-colors ${
-                      active ? 'bg-neutral-100' : 'hover:bg-neutral-50'
-                    }`}
+                    title="会话操作"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      setMenuFor(menuFor === session.id ? null : session.id)
+                    }}
+                    className="absolute right-1.5 top-1.5 rounded px-1 text-neutral-400 opacity-0 hover:bg-neutral-200 hover:text-neutral-700 group-hover:opacity-100"
                   >
-                    <span className="block truncate text-sm">{session.title}</span>
-                    <span className="mt-0.5 block text-xs text-neutral-500">
-                      回合 {session.turn} · {relativeTime(session.updatedAt)}
-                      {session.status === 'ended' && ' · 已结束'}
-                    </span>
+                    ⋯
                   </button>
+
+                  {menuFor === session.id && (
+                    <div className="absolute right-1.5 top-8 z-20 w-40 overflow-hidden rounded-md border border-neutral-200 bg-white text-xs shadow-lg">
+                      <button
+                        type="button"
+                        onClick={() => startRename(session)}
+                        className="block w-full px-3 py-2 text-left hover:bg-neutral-50"
+                      >
+                        重命名
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void download(session)}
+                        className="block w-full px-3 py-2 text-left hover:bg-neutral-50"
+                      >
+                        导出 Markdown
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void toggleEnded(session)}
+                        className="block w-full px-3 py-2 text-left hover:bg-neutral-50"
+                      >
+                        {session.status === 'ended' ? '重新打开' : '结束这局'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void confirmRemove(session)}
+                        className="block w-full px-3 py-2 text-left text-red-600 hover:bg-red-50"
+                      >
+                        删除
+                      </button>
+                    </div>
+                  )}
                 </li>
               )
             })}

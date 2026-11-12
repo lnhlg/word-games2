@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
 export interface SessionMeta {
@@ -175,6 +175,81 @@ export function writeSnapshot(dir: string, turn: number, state: GameState): void
     JSON.stringify({ ...state, turn }, null, 2) + '\n',
     'utf8',
   )
+}
+
+export function patchMeta(
+  dir: string,
+  patch: { title?: string; status?: SessionMeta['status']; model?: string },
+): SessionMeta {
+  const meta = readMeta(dir)
+  if (patch.title !== undefined) {
+    const title = patch.title.trim().slice(0, 80)
+    if (title) meta.title = title
+  }
+  if (patch.status !== undefined) meta.status = patch.status
+  if (patch.model !== undefined && patch.model.trim()) meta.model = patch.model.trim()
+  meta.updatedAt = new Date().toISOString()
+  writeMeta(dir, meta)
+  return meta
+}
+
+/** 删除整个会话文件夹；id 必须是单段目录名，防止穿越到工作区之外。 */
+export function removeSession(root: string, id: string): boolean {
+  if (!id || id === '.' || id === '..' || id.includes('/') || id.includes('\\')) return false
+  const dir = sessionDir(root, id)
+  if (!existsSync(path.join(dir, 'session.json'))) return false
+  rmSync(dir, { recursive: true, force: true })
+  return true
+}
+
+function clockOf(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return ''
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+}
+
+/** 把一局导出为 Markdown：元信息、世界、全部回合、最终状态。 */
+export function exportMarkdown(
+  dir: string,
+  meta: SessionMeta,
+  messages: MessageRecord[],
+  state: GameState,
+): string {
+  const worldFile = path.join(dir, 'world.yaml')
+  const world = existsSync(worldFile) ? readFileSync(worldFile, 'utf8').trim() : ''
+  const statusText = meta.status === 'ended' ? '已结束' : meta.status === 'archived' ? '已归档' : '进行中'
+  const lines: string[] = [
+    `# ${meta.title}`,
+    '',
+    `- 会话：\`${meta.id}\``,
+    `- 模型：${meta.model}`,
+    `- 回合：${meta.turn}`,
+    `- 状态：${statusText}`,
+    `- 创建：${meta.createdAt}`,
+    `- 更新：${meta.updatedAt}`,
+    '',
+  ]
+  if (world) lines.push('## 世界', '', '```yaml', world, '```', '')
+
+  lines.push('## 剧情', '')
+  let currentTurn = -1
+  for (const m of messages) {
+    if ('turn' in m && m.turn !== currentTurn) {
+      currentTurn = m.turn
+      const clock = m.role === 'player' ? clockOf(m.at) : ''
+      lines.push(`### 回合 ${currentTurn + 1}${clock ? ` · ${clock}` : ''}`, '')
+    }
+    if (m.role === 'player') lines.push(`> **玩家**：${m.text}`, '')
+    else if (m.role === 'engine' && m.kind === 'text') lines.push(m.text, '')
+    else if (m.role === 'engine' && m.kind === 'tool_call')
+      lines.push(`- 工具 \`${m.name}\`：\`${JSON.stringify(m.args)}\``, '')
+    else if (m.role === 'tool') lines.push(`  - 结果：\`${JSON.stringify(m.result)}\``, '')
+    else if (m.role === 'engine' && m.kind === 'options') lines.push(`- 选项：${m.options.join(' / ')}`, '')
+    else if (m.role === 'system') lines.push(`- 系统：${m.text}`, '')
+  }
+
+  lines.push('## 最终状态', '', '```json', JSON.stringify(state, null, 2), '```', '')
+  return lines.join('\n')
 }
 
 export function readSession(

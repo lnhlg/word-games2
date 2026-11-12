@@ -80,6 +80,37 @@ export async function getSession(workspace: string, id: string): Promise<Session
   )
 }
 
+export async function patchSession(
+  workspace: string,
+  id: string,
+  patch: { title?: string; status?: SessionMeta['status'] },
+): Promise<SessionMeta> {
+  const { session } = await request<{ session: SessionMeta }>(
+    `/api/sessions/${encodeURIComponent(id)}?workspace=${encodeURIComponent(workspace)}`,
+    {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(patch),
+    },
+  )
+  return session
+}
+
+export async function deleteSession(workspace: string, id: string): Promise<void> {
+  await request<{ ok: boolean }>(
+    `/api/sessions/${encodeURIComponent(id)}?workspace=${encodeURIComponent(workspace)}`,
+    { method: 'DELETE' },
+  )
+}
+
+export async function exportSession(workspace: string, id: string): Promise<string> {
+  const res = await fetch(
+    `/api/sessions/${encodeURIComponent(id)}/export?workspace=${encodeURIComponent(workspace)}`,
+  )
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`)
+  return res.text()
+}
+
 /** 提交一次玩家输入，按 SSE 事件回调；signal 中断时 fetch 被 abort。 */
 export async function streamTurn(
   workspace: string,
