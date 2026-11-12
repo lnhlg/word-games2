@@ -1,3 +1,5 @@
+import type { GameState, MessageRecord, TurnEvent } from './types'
+
 export interface SessionMeta {
   id: string
   title: string
@@ -6,6 +8,12 @@ export interface SessionMeta {
   updatedAt: string
   turn: number
   status: 'active' | 'ended' | 'archived'
+}
+
+export interface SessionDetail {
+  meta: SessionMeta
+  messages: MessageRecord[]
+  state: GameState
 }
 
 export interface Workspace {
@@ -64,4 +72,55 @@ export async function createSession(workspace: string): Promise<SessionMeta> {
     },
   )
   return session
+}
+
+export async function getSession(workspace: string, id: string): Promise<SessionDetail> {
+  return request<SessionDetail>(
+    `/api/sessions/${encodeURIComponent(id)}?workspace=${encodeURIComponent(workspace)}`,
+  )
+}
+
+/** 提交一次玩家输入，按 SSE 事件回调；signal 中断时 fetch 被 abort。 */
+export async function streamTurn(
+  workspace: string,
+  id: string,
+  input: string,
+  onEvent: (event: TurnEvent) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(id)}/turns?workspace=${encodeURIComponent(workspace)}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ input }),
+    signal,
+  })
+
+  if (!res.ok || !res.body) {
+    throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`)
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+
+    let index = buffer.indexOf('\n\n')
+    while (index >= 0) {
+      const block = buffer.slice(0, index)
+      buffer = buffer.slice(index + 2)
+      const line = block.split('\n').find((l) => l.startsWith('data:'))
+      if (line) {
+        try {
+          onEvent(JSON.parse(line.slice(5).trim()) as TurnEvent)
+        } catch {
+          // 忽略坏帧
+        }
+      }
+      index = buffer.indexOf('\n\n')
+    }
+  }
 }

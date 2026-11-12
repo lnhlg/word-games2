@@ -11,9 +11,36 @@ export interface SessionMeta {
   status: 'active' | 'ended' | 'archived'
 }
 
-const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'deepseek-chat'
+export interface CheckResult {
+  attribute: string
+  roll: number
+  total: number
+  dc: number
+  success: boolean
+}
 
-const DEFAULT_WORLD = `engine:
+export interface GameState {
+  turn: number
+  scene: string
+  location: string
+  stats: Record<string, number>
+  inventory: string[]
+  flags: Record<string, boolean>
+  lastCheck: CheckResult | null
+  ending: string | null
+}
+
+export type MessageRecord =
+  | { role: 'player'; turn: number; at: string; text: string }
+  | { role: 'engine'; turn: number; kind: 'text'; text: string }
+  | { role: 'engine'; turn: number; kind: 'tool_call'; id: string; name: string; args: unknown }
+  | { role: 'tool'; turn: number; callId: string; name: string; ok: boolean; result: unknown }
+  | { role: 'engine'; turn: number; kind: 'options'; options: string[] }
+  | { role: 'system'; kind: 'error'; text: string }
+
+export const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'deepseek-chat'
+
+export const DEFAULT_WORLD = `engine:
   name: "叙事引擎"
   tone: "冷峻、克制、第二人称"
   boundaries:
@@ -33,13 +60,13 @@ scenes:
 endings: []
 `
 
-const DEFAULT_STATE = {
+export const DEFAULT_STATE: GameState = {
   turn: 0,
   scene: '门厅',
   location: 'hallway',
   stats: { 洞察: 2, 胆识: 2, 共情: 2 },
-  inventory: [] as string[],
-  flags: {} as Record<string, boolean>,
+  inventory: [],
+  flags: {},
   lastCheck: null,
   ending: null,
 }
@@ -53,6 +80,10 @@ const DEFAULT_AGENT = `# AGENT.md
 `
 
 const pad = (n: number) => String(n).padStart(2, '0')
+
+export function sessionDir(root: string, id: string): string {
+  return path.join(root, id)
+}
 
 export function newSessionId(root: string): string {
   const d = new Date()
@@ -106,17 +137,51 @@ export function listSessions(root: string): SessionMeta[] {
   return out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
 }
 
-export function readSession(root: string, id: string): { meta: SessionMeta; messages: unknown[] } | null {
-  const dir = path.join(root, id)
-  const file = path.join(dir, 'session.json')
-  if (!existsSync(file)) return null
-  const meta = JSON.parse(readFileSync(file, 'utf8')) as SessionMeta
-  const msgFile = path.join(dir, 'messages.jsonl')
-  const messages = existsSync(msgFile)
-    ? readFileSync(msgFile, 'utf8')
-        .split('\n')
-        .filter(Boolean)
-        .map((line) => JSON.parse(line))
-    : []
-  return { meta, messages }
+export function readMeta(dir: string): SessionMeta {
+  return JSON.parse(readFileSync(path.join(dir, 'session.json'), 'utf8')) as SessionMeta
+}
+
+export function writeMeta(dir: string, meta: SessionMeta): void {
+  writeFileSync(path.join(dir, 'session.json'), JSON.stringify(meta, null, 2) + '\n', 'utf8')
+}
+
+export function readState(dir: string): GameState {
+  const file = path.join(dir, 'state.json')
+  if (!existsSync(file)) return JSON.parse(JSON.stringify(DEFAULT_STATE)) as GameState
+  return JSON.parse(readFileSync(file, 'utf8')) as GameState
+}
+
+export function writeState(dir: string, state: GameState): void {
+  writeFileSync(path.join(dir, 'state.json'), JSON.stringify(state, null, 2) + '\n', 'utf8')
+}
+
+export function appendMessage(dir: string, msg: MessageRecord): void {
+  writeFileSync(path.join(dir, 'messages.jsonl'), JSON.stringify(msg) + '\n', { flag: 'a', encoding: 'utf8' })
+}
+
+export function readMessages(dir: string): MessageRecord[] {
+  const file = path.join(dir, 'messages.jsonl')
+  if (!existsSync(file)) return []
+  return readFileSync(file, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as MessageRecord)
+}
+
+export function writeSnapshot(dir: string, turn: number, state: GameState): void {
+  mkdirSync(path.join(dir, 'snapshots'), { recursive: true })
+  writeFileSync(
+    path.join(dir, 'snapshots', `${turn}.json`),
+    JSON.stringify({ ...state, turn }, null, 2) + '\n',
+    'utf8',
+  )
+}
+
+export function readSession(
+  root: string,
+  id: string,
+): { meta: SessionMeta; messages: MessageRecord[]; state: GameState } | null {
+  const dir = sessionDir(root, id)
+  if (!existsSync(path.join(dir, 'session.json'))) return null
+  return { meta: readMeta(dir), messages: readMessages(dir), state: readState(dir) }
 }
