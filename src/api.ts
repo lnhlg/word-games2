@@ -19,6 +19,8 @@ export interface WorkspaceRegistry {
   current: string | null
 }
 
+export type PickResult = (WorkspaceRegistry & { workspace: Workspace }) | { cancelled: true }
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init)
   if (!res.ok) {
@@ -30,6 +32,11 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 
 export async function getWorkspaces(): Promise<WorkspaceRegistry> {
   return request<WorkspaceRegistry>('/api/workspaces')
+}
+
+/** 让后端弹系统文件夹选择框；用户取消时返回 { cancelled: true }。 */
+export async function pickWorkspace(): Promise<PickResult> {
+  return request<PickResult>('/api/workspaces/pick', { method: 'POST' })
 }
 
 export async function openWorkspace(path: string): Promise<WorkspaceRegistry & { workspace: Workspace }> {

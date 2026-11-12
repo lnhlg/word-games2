@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useState } from 'react'
 import { useApp } from './store'
 
 function relativeTime(iso: string): string {
@@ -21,6 +21,7 @@ export default function App() {
     creating,
     error,
     load,
+    pick,
     openWorkspace,
     create,
     select,
@@ -28,22 +29,14 @@ export default function App() {
   const current = sessions.find((s) => s.id === currentId) ?? null
   const workspace = workspaces.find((w) => w.path === currentWorkspace) ?? null
   const [pickerOpen, setPickerOpen] = useState(false)
-  const [draftPath, setDraftPath] = useState('')
 
   useEffect(() => {
     void load()
   }, [load])
 
-  async function submitWorkspace(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault()
-    if (!draftPath.trim()) return
-    try {
-      await openWorkspace(draftPath.trim())
-      setPickerOpen(false)
-      setDraftPath('')
-    } catch {
-      // store 已记录错误，输入框留着让用户改
-    }
+  async function handlePick() {
+    await pick()
+    setPickerOpen(false)
   }
 
   return (
@@ -77,32 +70,14 @@ export default function App() {
             </button>
 
             {pickerOpen && (
-              <form
-                onSubmit={submitWorkspace}
-                className="mt-2 space-y-2 rounded-md border border-neutral-200 p-2"
-              >
-                <input
-                  autoFocus
-                  value={draftPath}
-                  onChange={(e) => setDraftPath(e.target.value)}
-                  placeholder="目录绝对路径，如 D:\\games\\雾港"
-                  className="w-full rounded border border-neutral-200 px-2 py-1.5 text-xs outline-none focus:border-neutral-400"
-                />
-                <div className="flex items-center gap-2">
-                  <button
-                    type="submit"
-                    className="rounded bg-neutral-900 px-2 py-1 text-xs text-white hover:bg-neutral-700"
-                  >
-                    打开
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPickerOpen(false)}
-                    className="rounded px-2 py-1 text-xs text-neutral-500 hover:bg-neutral-100"
-                  >
-                    取消
-                  </button>
-                </div>
+              <div className="mt-2 space-y-2 rounded-md border border-neutral-200 p-2">
+                <button
+                  type="button"
+                  onClick={() => void handlePick()}
+                  className="w-full rounded bg-neutral-900 px-2 py-1.5 text-xs font-medium text-white hover:bg-neutral-700"
+                >
+                  📂 选择目录…
+                </button>
 
                 {workspaces.length > 0 && (
                   <div className="space-y-1 border-t border-neutral-100 pt-2">
@@ -113,7 +88,6 @@ export default function App() {
                         type="button"
                         title={w.path}
                         onClick={() => {
-                          setDraftPath(w.path)
                           void openWorkspace(w.path)
                             .then(() => setPickerOpen(false))
                             .catch(() => {})
@@ -125,7 +99,7 @@ export default function App() {
                     ))}
                   </div>
                 )}
-              </form>
+              </div>
             )}
           </div>
         </div>

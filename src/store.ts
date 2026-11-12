@@ -4,6 +4,7 @@ import {
   getWorkspaces,
   listSessions,
   openWorkspace as openWorkspaceApi,
+  pickWorkspace,
   type SessionMeta,
   type Workspace,
 } from './api'
@@ -17,6 +18,7 @@ interface AppState {
   creating: boolean
   error: string | null
   load: () => Promise<void>
+  pick: () => Promise<void>
   openWorkspace: (path: string) => Promise<void>
   create: () => Promise<void>
   select: (id: string | null) => void
@@ -42,6 +44,31 @@ export const useApp = create<AppState>((set, get) => ({
         sessions,
         loading: false,
         currentId: get().currentId ?? sessions[0]?.id ?? null,
+      })
+    } catch (e) {
+      set({ loading: false, error: e instanceof Error ? e.message : String(e) })
+    }
+  },
+
+  pick: async () => {
+    set({ loading: true, error: null })
+    try {
+      const result = await pickWorkspace()
+      if ('cancelled' in result) {
+        set({ loading: false })
+        return
+      }
+      if (!result.current) {
+        set({ loading: false, error: '没有选中工作区' })
+        return
+      }
+      const sessions = await listSessions(result.current)
+      set({
+        workspaces: result.workspaces,
+        currentWorkspace: result.current,
+        sessions,
+        loading: false,
+        currentId: sessions[0]?.id ?? null,
       })
     } catch (e) {
       set({ loading: false, error: e instanceof Error ? e.message : String(e) })
