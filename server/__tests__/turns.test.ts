@@ -1,18 +1,11 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import app from '../app'
 import { setLlmRunner } from '../lib/llm'
-import {
-  readMessages,
-  readMeta,
-  readState,
-  sessionDir,
-  type GameState,
-  type MessageRecord,
-} from '../lib/session-fs'
-import { loadWorld } from '../lib/world'
+import { setOptionsRunner } from '../lib/options'
+import { readMessages, readMeta, sessionDir } from '../lib/session-fs'
 import { runTurn } from '../lib/turn'
 
 let root: string
@@ -23,38 +16,33 @@ const q = (ws: string) => `?workspace=${encodeURIComponent(ws)}`
 beforeEach(async () => {
   root = mkdtempSync(path.join(tmpdir(), 'word-games-turn-'))
   process.env.APP_DATA_DIR = mkdtempSync(path.join(tmpdir(), 'word-games-app-'))
+  process.env.PROVIDERS_FILE = path.join(root, 'providers.json')
   const created = await app.request(`/api/sessions${q(root)}`, { method: 'POST' })
-  const body = (await created.json()) as { session: { id: string } }
-  sessionId = body.session.id
+  sessionId = ((await created.json()) as { session: { id: string } }).session.id
+  // 选项生成会再调一次 LLM；这些用例只关心正文，默认关掉。
+  setOptionsRunner(async () => [])
 })
 
 afterEach(() => {
   setLlmRunner(null)
+  setOptionsRunner(null)
+  delete process.env.PROVIDERS_FILE
+  delete process.env.DEFAULT_MODEL
 })
 
-interface ScriptStep {
-  text?: string
-  tools?: { name: string; args: unknown }[]
-}
-
-/** 可编程假 LLM：按顺序消费脚本，每次调用产出一步。 */
-function fakeLlm(script: ScriptStep[]) {
+/** 可编程假 LLM：每次调用消费脚本里的一步。 */
+function fakeLlm(script: Array<{ text?: string; fail?: string }>) {
   let step = 0
   return async function* () {
-    const current = script[step] ?? { text: '（脚本结束）', tools: [] }
+    const current = script[step] ?? { text: '（脚本结束）' }
     step += 1
     if (current.text) yield { type: 'delta' as const, text: current.text }
-    for (const [index, tool] of (current.tools ?? []).entries()) {
-      yield {
-        type: 'tool_call' as const,
-        toolCall: { id: `call_${step}_${index}`, name: tool.name, args: JSON.stringify(tool.args) },
-      }
-    }
+    if (current.fail) throw new Error(current.fail)
     yield { type: 'done' as const, finishReason: 'stop' }
   }
 }
 
-function parseSse(text: string): { type: string; [key: string]: unknown }[] {
+function parseSse(text: string): Array<{ type: string; [key: string]: unknown }> {
   return text
     .split('\n\n')
     .map((block) => block.trim())
@@ -62,317 +50,93 @@ function parseSse(text: string): { type: string; [key: string]: unknown }[] {
     .map((block) => JSON.parse(block.replace(/^data:\s*/, '')) as { type: string })
 }
 
-async function postTurn(input: string) {
+async function postTurn(input: string, retry = false) {
   return app.request(`/api/sessions/${sessionId}/turns${q(root)}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ input }),
+    body: JSON.stringify(retry ? { input, retry: true } : { input }),
   })
 }
 
-describe('POST /turns，假 LLM 驱动', () => {
-  it('工具调用 + end_turn 产生完整事件序列，并落盘消息与快照', async () => {
-    setLlmRunner(
-      fakeLlm([
-        { tools: [{ name: 'roll_check', args: { attribute: '洞察', dc: 10 } }] },
-        {
-          text: '门轴发出一声干涩的呻吟。',
-          tools: [{ name: 'end_turn', args: { narrative: '', options: ['继续往里走', '退回门厅'] } }],
-        },
-      ]),
-    )
-
-    const res = await postTurn('我推开书房的门')
+describe('POST /turns：假 LLM 驱动', () => {
+  it('一条大纲 → 一次调用 → 一段情节，事件与落盘都对', async () => {
+    setLlmRunner(fakeLlm([{ text: '门轴发出一声干涩的呻吟。' }]))
+    const res = await postTurn('有人敲门。')
     expect(res.status).toBe(200)
 
     const events = parseSse(await res.text())
-    const types = events.map((e) => e.type)
-    expect(types).toContain('turn_start')
-    expect(types).toContain('tool_call')
-    expect(types).toContain('tool_result')
-    expect(types).toContain('delta')
-    expect(types).toContain('options')
-    expect(types).toContain('state')
-    expect(types).toContain('done')
+    expect(events.map((event) => event.type)).toEqual(['turn_start', 'delta', 'done'])
+    expect(events[0].turn).toBe(0)
+    expect(events[1].text).toBe('门轴发出一声干涩的呻吟。')
+    expect(events[2].turn).toBe(1)
 
-    const optionsEvent = events.find((e) => e.type === 'options') as unknown as { options: string[] }
-    expect(optionsEvent.options).toEqual(['继续往里走', '退回门厅'])
-
-    const dir = path.join(root, sessionId)
-    const records = readFileSync(path.join(dir, 'messages.jsonl'), 'utf8')
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line) as MessageRecord)
-
-    expect(records[0]).toMatchObject({ role: 'player', text: '我推开书房的门' })
-    expect(records.some((r) => r.role === 'engine' && r.kind === 'tool_call' && r.name === 'roll_check')).toBe(true)
-    expect(records.some((r) => r.role === 'tool' && r.name === 'roll_check' && r.ok)).toBe(true)
-    expect(records.some((r) => r.role === 'engine' && r.kind === 'options')).toBe(true)
-
-    expect(existsSync(path.join(dir, 'snapshots', '0.json'))).toBe(true)
-
-    const state = JSON.parse(readFileSync(path.join(dir, 'state.json'), 'utf8')) as GameState
-    expect(state.turn).toBe(1)
-    expect(state.lastCheck?.attribute).toBe('洞察')
-
-    const meta = JSON.parse(readFileSync(path.join(dir, 'session.json'), 'utf8')) as { turn: number }
-    expect(meta.turn).toBe(1)
-  })
-
-  it('move_to 更新 state.json 的位置，工具结果写进 messages.jsonl', async () => {
-    setLlmRunner(
-      fakeLlm([
-        { tools: [{ name: 'move_to', args: { scene: 'study' } }] },
-        {
-          text: '书房里一股旧纸的味道。',
-          tools: [{ name: 'end_turn', args: { narrative: '', options: ['翻抽屉', '回门厅'] } }],
-        },
-      ]),
-    )
-
-    const res = await postTurn('走进书房')
-    expect(res.status).toBe(200)
-    // 必须消费 SSE 流，等 runTurn 写完 state.json 再断言
-    await res.text()
-
-    const dir = path.join(root, sessionId)
-    const state = JSON.parse(readFileSync(path.join(dir, 'state.json'), 'utf8')) as GameState
-    expect(state.location).toBe('study')
-    expect(state.scene).toBe('旧书房')
-
-    const records = readFileSync(path.join(dir, 'messages.jsonl'), 'utf8')
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line) as MessageRecord)
-    const moveCall = records.find((r) => r.role === 'engine' && r.kind === 'tool_call' && r.name === 'move_to')
-    expect(moveCall).toMatchObject({ args: { scene: 'study' } })
-  })
-
-  it('rollback 恢复到快照、消息流截断，messages.jsonl 不回写', async () => {
-    setLlmRunner(
-      fakeLlm([
-        { text: '第一回合的叙事。', tools: [{ name: 'end_turn', args: { narrative: '', options: ['甲', '乙'] } }] },
-        { text: '第二回合的叙事。', tools: [{ name: 'end_turn', args: { narrative: '', options: ['丙', '丁'] } }] },
-      ]),
-    )
-
-    await (await postTurn('第一句')).text()
-    await (await postTurn('第二句')).text()
-
-    const dir = path.join(root, sessionId)
-    const file = path.join(dir, 'messages.jsonl')
-    const before = readFileSync(file, 'utf8').trim().split('\n')
-    expect(before.some((line) => line.includes('第二句'))).toBe(true)
-
-    const snapshot = JSON.parse(readFileSync(path.join(dir, 'snapshots', '0.json'), 'utf8')) as GameState
-    expect(snapshot.turn).toBe(0)
-
-    const res = await app.request(`/api/sessions/${sessionId}/rollback${q(root)}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ turn: 0 }),
-    })
-    expect(res.status).toBe(200)
-    const body = (await res.json()) as { meta: { turn: number }; state: GameState; messages: MessageRecord[] }
-
-    expect(body.meta.turn).toBe(1)
-    expect(body.state.turn).toBe(1)
-    expect(body.state.location).toBe(snapshot.location)
-    expect(body.messages.some((m) => m.role === 'player' && m.text === '第二句')).toBe(false)
-    expect(body.messages.some((m) => m.role === 'engine' && m.kind === 'text' && m.text.includes('第二回合'))).toBe(false)
-    expect(body.messages.some((m) => m.role === 'player' && m.text === '第一句')).toBe(true)
-
-    const after = readFileSync(file, 'utf8').trim().split('\n')
-    expect(after.length).toBe(before.length)
-
-    const stateOnDisk = JSON.parse(readFileSync(path.join(dir, 'state.json'), 'utf8')) as GameState
-    expect(stateOnDisk.turn).toBe(1)
-  })
-
-  it('rollback 到不存在的快照返回 404', async () => {
-    const res = await app.request(`/api/sessions/${sessionId}/rollback${q(root)}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ turn: 9 }),
-    })
-    expect(res.status).toBe(404)
-  })
-
-  it('中断：已生成的半截叙事落盘，回合数不前进，留下中断标记', async () => {
     const dir = sessionDir(root, sessionId)
-    setLlmRunner(async function* () {
-      yield { type: 'delta' as const, text: '门轴发出一声干涩' }
-      await new Promise((resolve) => setTimeout(resolve, 50))
-      yield { type: 'delta' as const, text: '的呻吟。' }
-      yield { type: 'done' as const, finishReason: 'stop' }
-    })
+    const messages = readMessages(dir)
+    expect(messages[0]).toMatchObject({ role: 'director', turn: 0, text: '有人敲门。' })
+    expect(messages[1]).toMatchObject({ role: 'narrative', turn: 0, text: '门轴发出一声干涩的呻吟。' })
+    expect(readMeta(dir).turn).toBe(1)
+  })
 
-    const controller = new AbortController()
-    const running = runTurn({
-      dir,
-      meta: readMeta(dir),
-      world: loadWorld(dir),
-      state: readState(dir),
-      agentMd: '',
-      memories: [],
-      history: [],
-      playerInput: '推门',
-      signal: controller.signal,
-      emit: () => {},
-    })
-    setTimeout(() => controller.abort(), 10)
-    await running
+  it('模型报错时落一条 system error，回合号不变', async () => {
+    setLlmRunner(fakeLlm([{ fail: '上游 500' }]))
+    const res = await postTurn('有人敲门。')
+    const events = parseSse(await res.text())
+    expect(events.some((event) => event.type === 'error')).toBe(true)
 
-    const records = readMessages(dir)
-    expect(records.some((r) => r.role === 'engine' && r.kind === 'text' && r.text.includes('门轴发出一声干涩'))).toBe(true)
-    expect(records.some((r) => r.role === 'engine' && r.kind === 'text' && r.text.includes('的呻吟'))).toBe(false)
-    expect(records.some((r) => r.role === 'system' && r.text.includes('已中断'))).toBe(true)
+    const dir = sessionDir(root, sessionId)
+    const messages = readMessages(dir)
+    expect(messages.at(-1)).toMatchObject({ role: 'system', kind: 'error', text: '上游 500' })
     expect(readMeta(dir).turn).toBe(0)
-    expect(readState(dir).turn).toBe(0)
   })
 
-  it('模型失败：写 system/error 条目，回合数不前进', async () => {
+  it('retry 复用已落盘的导演消息，不再追加一条', async () => {
+    setLlmRunner(fakeLlm([{ text: '第一次写成。' }, { text: '第二次写成。' }]))
+    await (await postTurn('有人敲门。')).text()
+    await (await postTurn('有人敲门。', true)).text()
+
     const dir = sessionDir(root, sessionId)
+    const messages = readMessages(dir)
+    const directors = messages.filter((message) => message.role === 'director')
+    const narratives = messages.filter((message) => message.role === 'narrative')
+    expect(directors).toHaveLength(1)
+    expect(narratives).toHaveLength(2)
+    expect(readMeta(dir).turn).toBe(2)
+  })
+
+  it('空大纲返回 400', async () => {
+    setLlmRunner(fakeLlm([{ text: '不该被调用' }]))
+    expect((await postTurn('   ')).status).toBe(400)
+  })
+
+  it('中断时保留半截情节并标记 interrupted', async () => {
+    const dir = sessionDir(root, sessionId)
+    const meta = readMeta(dir)
+    const controller = new AbortController()
     setLlmRunner(async function* () {
-      throw new Error('模型炸了')
+      yield { type: 'delta' as const, text: '门轴发出一声' }
+      controller.abort()
+      yield { type: 'done' as const }
     })
 
     await runTurn({
       dir,
-      meta: readMeta(dir),
-      world: loadWorld(dir),
-      state: readState(dir),
+      meta,
       agentMd: '',
+      cast: [],
       memories: [],
       history: [],
-      playerInput: '推门',
+      outline: '有人敲门。',
+      signal: controller.signal,
       emit: () => {},
     })
 
-    const records = readMessages(dir)
-    expect(records.some((r) => r.role === 'system' && r.text.includes('模型炸了'))).toBe(true)
-    expect(readMeta(dir).turn).toBe(0)
-  })
-
-  it('改模型后下一回合的 prompt 用对应的 <model>.md', async () => {
-    const dir = sessionDir(root, sessionId)
-    writeFileSync(path.join(dir, 'fake-model.md'), '【专用设定】只按这个设定叙事。', 'utf8')
-
-    const patched = await app.request(`/api/sessions/${sessionId}${q(root)}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'fake-model' }),
+    const messages = readMessages(dir)
+    expect(messages.at(-1)).toMatchObject({
+      role: 'narrative',
+      turn: 0,
+      interrupted: true,
+      text: '门轴发出一声',
     })
-    expect(patched.status).toBe(200)
-
-    let systemText = ''
-    setLlmRunner(async function* (params) {
-      systemText = params.messages
-        .filter((message) => message.role === 'system')
-        .map((message) => message.content)
-        .join('\n')
-      yield { type: 'delta' as const, text: '嗯。' }
-      yield {
-        type: 'tool_call' as const,
-        toolCall: {
-          id: 'call_end',
-          name: 'end_turn',
-          args: JSON.stringify({ narrative: '', options: ['继续', '后退'] }),
-        },
-      }
-      yield { type: 'done' as const, finishReason: 'stop' }
-    })
-
-    const res = await postTurn('往前走')
-    await res.text()
-    expect(systemText).toContain('【专用设定】')
-  })
-
-  it('改 AGENT.md 后下一回合立即生效，无需重启', async () => {
-    const dir = sessionDir(root, sessionId)
-    let systemText = ''
-    setLlmRunner(async function* (params) {
-      systemText = params.messages
-        .filter((message) => message.role === 'system')
-        .map((message) => message.content)
-        .join('\n')
-      yield { type: 'delta' as const, text: '好。' }
-      yield {
-        type: 'tool_call' as const,
-        toolCall: {
-          id: 'call_end',
-          name: 'end_turn',
-          args: JSON.stringify({ narrative: '', options: ['走', '停'] }),
-        },
-      }
-      yield { type: 'done' as const, finishReason: 'stop' }
-    })
-
-    writeFileSync(path.join(dir, 'AGENT.md'), '【第一版】按第一版行事。', 'utf8')
-    await (await postTurn('一')).text()
-    expect(systemText).toContain('【第一版】')
-
-    writeFileSync(path.join(dir, 'AGENT.md'), '【第二版】按第二版行事。', 'utf8')
-    await (await postTurn('二')).text()
-    expect(systemText).toContain('【第二版】')
-    expect(systemText).not.toContain('【第一版】')
-  })
-
-  it('已记忆的回合压成摘要 + 索引，不再进最近剧情', async () => {
-    const dir = sessionDir(root, sessionId)
-    const records: MessageRecord[] = []
-    for (let turn = 0; turn < 9; turn++) {
-      records.push({
-        role: 'player',
-        turn,
-        at: `2026-11-12T00:00:0${turn}.000Z`,
-        text: `第 ${turn + 1} 回合的玩家行动`,
-      })
-      records.push({
-        role: 'engine',
-        turn,
-        at: `2026-11-12T00:00:1${turn}.000Z`,
-        kind: 'text',
-        text: `第 ${turn + 1} 回合的叙事`,
-      })
-    }
-    writeFileSync(
-      path.join(dir, 'messages.jsonl'),
-      records.map((record) => JSON.stringify(record)).join('\n') + '\n',
-      'utf8',
-    )
-    writeFileSync(
-      path.join(dir, 'memory.jsonl'),
-      JSON.stringify({
-        id: 'm0-3',
-        turns: [0, 3],
-        summary: '玩家在门厅翻找。',
-        keywords: ['门厅'],
-        entities: [],
-        createdAt: '',
-      }) + '\n',
-      'utf8',
-    )
-
-    let capturedUser = ''
-    setLlmRunner(async function* (params) {
-      capturedUser = params.messages.find((message) => message.role === 'user')?.content ?? ''
-      yield { type: 'delta' as const, text: '好。' }
-      yield {
-        type: 'tool_call' as const,
-        toolCall: {
-          id: 'call_end',
-          name: 'end_turn',
-          args: JSON.stringify({ narrative: '', options: ['走', '停'] }),
-        },
-      }
-      yield { type: 'done' as const, finishReason: 'stop' }
-    })
-
-    await (await postTurn('继续')).text()
-    expect(capturedUser).toContain('【更早剧情（摘要 + 索引）】')
-    expect(capturedUser).toContain('回合 1–4：玩家在门厅翻找。')
-    expect(capturedUser).not.toContain('第 1 回合的玩家行动')
-    expect(capturedUser).toContain('第 9 回合的玩家行动')
+    expect(readMeta(dir).turn).toBe(1)
   })
 })

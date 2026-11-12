@@ -1,24 +1,23 @@
 import { Hono } from 'hono'
-import { readSettings, updateSettings } from '../lib/settings'
+import { publicSettings, updateProvidersConfig, type SettingsInput } from '../lib/providers'
 
 const app = new Hono()
 
-app.get('/', (c) => c.json(readSettings()))
+app.get('/', (c) => c.json(publicSettings()))
 
 app.put('/', async (c) => {
-  let body: Record<string, unknown> = {}
+  let body: SettingsInput = {}
   try {
-    body = (await c.req.json()) as Record<string, unknown>
+    body = (await c.req.json()) as SettingsInput
   } catch {
-    body = {}
+    return c.json({ error: '请求体必须是 JSON 对象' }, 400)
   }
-  return c.json(
-    updateSettings({
-      baseUrl: typeof body.baseUrl === 'string' ? body.baseUrl : undefined,
-      apiKey: typeof body.apiKey === 'string' ? body.apiKey : undefined,
-      defaultModel: typeof body.defaultModel === 'string' ? body.defaultModel : undefined,
-    }),
-  )
+  try {
+    return c.json(publicSettings(updateProvidersConfig(body)))
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return c.json({ error: message }, 400)
+  }
 })
 
 export default app

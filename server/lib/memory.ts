@@ -74,13 +74,11 @@ export function pendingTurns(memories: MemoryRecord[], currentTurn: number): [nu
 
 export function transcriptOf(messages: MessageRecord[], turns: [number, number]): string {
   return messages
-    .filter((message) => 'turn' in message && message.turn >= turns[0] && message.turn <= turns[1])
-    .map((message) => {
-      if (message.role === 'player') return `玩家：${message.text}`
-      if (message.role === 'engine' && message.kind === 'text') return `引擎：${message.text}`
-      return ''
-    })
-    .filter(Boolean)
+    .filter(
+      (message): message is Exclude<MessageRecord, { role: 'system' }> =>
+        message.role !== 'system' && message.turn >= turns[0] && message.turn <= turns[1],
+    )
+    .map((message) => (message.role === 'director' ? `导演：${message.text}` : message.text))
     .join('\n')
 }
 
@@ -88,13 +86,22 @@ function defaultKeywords(transcript: string): string[] {
   return Array.from(new Set(transcript.match(/[\u4e00-\u9fa5]{2,4}/g) ?? [])).slice(0, 8)
 }
 
+/** 记忆摘要可以沿用会话模型，但不需要思考强度。 */
+export interface MemoryModelOptions {
+  model?: string
+  baseUrl?: string
+  apiKey?: string
+}
+
 /** 默认记忆生成器：让模型把一批回合压成摘要 + 索引；失败退化为截断。 */
-function llmRunner(model: string): MemoryRunner {
+function llmRunner(model: string, options: { baseUrl?: string; apiKey?: string } = {}): MemoryRunner {
   return async (_turns, transcript) => {
     let text = ''
     try {
       for await (const chunk of getLlmRunner()({
         model,
+        baseUrl: options.baseUrl,
+        apiKey: options.apiKey,
         messages: [
           {
             role: 'system',
@@ -139,12 +146,17 @@ export async function rememberBatch(
   dir: string,
   memories: MemoryRecord[],
   currentTurn: number,
-  model = process.env.DEFAULT_MODEL || 'deepseek-chat',
+  options: MemoryModelOptions | string = {},
 ): Promise<MemoryRecord | null> {
   const turns = pendingTurns(memories, currentTurn)
   if (!turns) return null
+  const modelOptions = typeof options === 'string' ? { model: options } : options
+  const model = modelOptions.model ?? (process.env.DEFAULT_MODEL || 'deepseek-chat')
   const transcript = transcriptOf(readMessages(dir), turns)
-  const runner = memoryRunner ?? llmRunner(model)
+  const runner = memoryRunner ?? llmRunner(model, {
+    baseUrl: modelOptions.baseUrl,
+    apiKey: modelOptions.apiKey,
+  })
   const digest = await runner(turns, transcript)
   const record: MemoryRecord = {
     id: `m${turns[0]}-${turns[1]}`,
@@ -168,32 +180,6 @@ export function memoryBlock(memories: MemoryRecord[]): string {
       return `${range}：${memory.summary}${keywords}`
     })
     .join('\n')
-}
-
-export interface MemoryHit {
-  turns: [number, number]
-  summary: string
-  keywords: string[]
-  excerpt: string
-}
-
-/** 按关键词在记忆索引里找，命中后取回该段回合的原文。 */
-export function searchMemories(dir: string, memories: MemoryRecord[], query: string): MemoryHit[] {
-  const needle = query.toLowerCase()
-  return memories
-    .filter(
-      (memory) =>
-        memory.summary.toLowerCase().includes(needle) ||
-        memory.keywords.some((keyword) => keyword.toLowerCase().includes(needle)) ||
-        memory.entities.some((entity) => entity.toLowerCase().includes(needle)),
-    )
-    .slice(-5)
-    .map((memory) => ({
-      turns: memory.turns,
-      summary: memory.summary,
-      keywords: memory.keywords,
-      excerpt: transcriptOf(readMessages(dir), memory.turns).slice(0, 1200),
-    }))
 }
 
 export function excerptTurns(dir: string, turns: [number, number]): string {

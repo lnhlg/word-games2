@@ -1,15 +1,18 @@
-import type { GameState } from './session-fs'
-import type { World } from './world'
+import type { CharacterCard } from './character-card'
 
-/** 代码注入、用户不可编辑的最小系统指令。身份数据放 world.yaml 的 engine 段。 */
-export const CONTRACT = `你是互动小说（Interactive Fiction）的叙事引擎（Narrative Engine）。
-你只负责生成场景、描写环境、推进剧情、判定结果，不替玩家做决定。
-每回合必须调用至少一次工具，并且必须以 end_turn 收尾；end_turn 的 options 给出 2–4 个可执行动作。
-判定一律用 roll_check：d6 + 属性 对比 dc，以工具返回的结果为准，不要自己编数值。
-移动一律用 move_to，只能走当前场景的出口。
-触发结局用 trigger_ending；结局触发后不再 end_turn。
-需要回忆更早的剧情细节时，用 recall 工具：按关键词搜记忆索引，或按回合范围取回原文。
-叙事用第二人称、冷峻克制；不剧透未触发的结局，不替玩家描述其内心决定。`
+/**
+ * 代码注入、用户不可编辑的剧场契约。
+ * 这是整场戏的最终约束：卡的 system_prompt 与 AGENT.md 都排在它后面。
+ */
+export const CONTRACT = `你是这场戏的小说家（novelist）。
+每一回合，导演给你一段大纲，你把它写成一段连贯的小说正文——有场景、有动作、有对话，像长篇小说里的一个章节片段。
+
+输出规则：
+- 只输出小说正文。不要标题、不要列表、不要小节标题、不要写作说明、不要反问导演、不要解释你在做什么。
+- 只写【演员表】里的角色。不要引入没交代过的人物，不要替角色做导演和大纲没有交代的重大决定，不要提前泄露后面才该发生的事。
+- 谁开口、谁沉默、谁先动，由情节自然决定；不要为了覆盖所有角色而轮流发言。
+- 保持【视角】指定的叙述人称与信息边界。
+- 排版：自然段之间空一行；段首顶格，不要自己加空格或缩进（缩进由界面统一给）；不要用 Markdown 记号（#、**、-、>、反引号）。`
 
 export interface ChatToolCall {
   id: string
@@ -23,56 +26,73 @@ export type ChatMessage =
   | { role: 'tool'; tool_call_id: string; content: string }
 
 export interface PromptInput {
+  /** 会话里的 AGENT.md（或 <模型名>.md）。 */
   agentMd: string
-  world: World
-  state: GameState
-  /** 更早剧情的摘要 + 索引（memoryBlock 的结果）。 */
+  /** 参演角色卡；缺卡时由调用方跳过。 */
+  cast: CharacterCard[]
+  perspective: string
+  /** 更早情节的摘要（memory.jsonl）。 */
   memory: string
-  history: { role: string; text: string }[]
-  playerInput: string
+  /** 最近若干回合的原始记录。 */
+  history: { role: 'director' | 'narrative'; text: string }[]
+  /** 本回合的导演大纲。 */
+  outline: string
 }
 
-export function worldBlock(world: World): string {
-  const engine = world.engine
-  const lines: string[] = []
-  if (engine?.name) lines.push(`引擎身份：${engine.name}`)
-  if (engine?.tone) lines.push(`语气：${engine.tone}`)
-  if (engine?.boundaries?.length) lines.push(`边界：${engine.boundaries.join('；')}`)
-  if (world.opening) lines.push(`开场：${world.opening}`)
-  if (world.scenes.length) {
-    lines.push('场景骨架：')
-    for (const s of world.scenes) lines.push(`- ${s.id}（${s.name}）出口：${s.exits.join(', ') || '无'}`)
-  }
-  if (world.endings.length) {
-    lines.push(`结局骨架：${world.endings.map((e) => e.id).join(', ')}`)
-  }
-  return lines.join('\n')
+/** 演员表：每张卡只取对写小说有用的字段；空字段整段略过。 */
+export function castBlock(cast: CharacterCard[]): string {
+  if (!cast.length) return '【演员表】\n（这场戏没有角色卡。按大纲写一个没有固定角色的片段。）'
+  return [
+    '【演员表】',
+    ...cast.map((card) => {
+      const d = card.data
+      const lines = [`## ${d.name}`]
+      if (d.description.trim()) lines.push(`人物设定：${d.description.trim()}`)
+      if (d.personality.trim()) lines.push(`性格：${d.personality.trim()}`)
+      if (d.scenario.trim()) lines.push(`处境：${d.scenario.trim()}`)
+      if (d.system_prompt.trim()) lines.push(`角色自带指令：${d.system_prompt.trim()}`)
+      if (d.first_mes.trim()) lines.push(`首次登场的语气参考（不要照抄）：${d.first_mes.trim()}`)
+      if (d.mes_example.trim()) lines.push(`对话样例：\n${d.mes_example.trim()}`)
+      return lines.join('\n')
+    }),
+  ].join('\n\n')
 }
 
-export function stateBlock(state: GameState): string {
-  return `当前状态（以 state.json 为准）：\n${JSON.stringify(state, null, 2)}`
-}
-
-export function historyBlock(history: { role: string; text: string }[]): string {
+function historyBlock(history: { role: 'director' | 'narrative'; text: string }[]): string {
   if (!history.length) return ''
-  return `最近剧情：\n${history.map((h) => `${h.role === 'player' ? '玩家' : '引擎'}：${h.text}`).join('\n')}`
+  const lines = history.map((h) => (h.role === 'director' ? `导演：${h.text}` : h.text))
+  return `【最近情节】\n${lines.join('\n\n')}`
 }
 
-/** 按 spec 顺序组装 messages：契约 → <model>.md / AGENT.md → world → state → 摘要 → 最近历史 → 玩家输入。 */
+/** 角色附注：post_history_instructions 排在情节之后、本轮大纲之前。 */
+function notesBlock(cast: CharacterCard[]): string {
+  const notes = cast
+    .map((card) => ({ name: card.data.name, text: card.data.post_history_instructions.trim() }))
+    .filter((note) => note.text)
+  if (!notes.length) return ''
+  return `【角色附注】\n${notes.map((note) => `${note.name}：${note.text}`).join('\n')}`
+}
+
+/**
+ * 按 SPEC 组装 messages：
+ * system = 剧场契约 → AGENT.md → 演员表 → 视角；
+ * user = 更早情节摘要 → 最近情节 → 角色附注 → 本回合大纲。
+ */
 export function buildMessages(input: PromptInput): ChatMessage[] {
   const system = [
     CONTRACT,
     input.agentMd.trim(),
-    worldBlock(input.world),
-    stateBlock(input.state),
+    castBlock(input.cast),
+    `【视角】\n${input.perspective.trim() || '第三人称限知'}`,
   ]
     .filter(Boolean)
     .join('\n\n')
 
   const user = [
-    input.memory ? `【更早剧情（摘要 + 索引）】\n${input.memory}` : '',
+    input.memory ? `【更早情节（摘要）】\n${input.memory}` : '',
     historyBlock(input.history),
-    `【玩家本回合行动】\n${input.playerInput}`,
+    notesBlock(input.cast),
+    `【本回合大纲】\n${input.outline.trim()}`,
   ]
     .filter(Boolean)
     .join('\n\n')

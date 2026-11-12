@@ -1,85 +1,116 @@
-import { describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { describe, expect, it } from 'vitest'
 import { resolveAgentMd } from '../lib/agent-md'
-import { buildMessages, CONTRACT } from '../lib/prompt'
-import type { GameState } from '../lib/session-fs'
-import type { World } from '../lib/world'
+import { buildMessages, CONTRACT, castBlock } from '../lib/prompt'
+import type { CharacterCard } from '../lib/character-card'
 
-const world: World = {
-  engine: { name: '雾港引擎', tone: '冷峻克制', boundaries: ['不替玩家做决定', '不剧透结局'] },
-  opening: '雾港的雨下了三天。',
-  scenes: [
-    { id: 'hallway', name: '门厅', exits: ['study', 'parlor'] },
-    { id: 'study', name: '旧书房', exits: ['hallway'] },
-  ],
-  endings: [{ id: 'ending_truth' }],
-  raw: '',
-}
-
-const state: GameState = {
-  turn: 2,
-  scene: 'hallway',
-  location: 'hallway',
-  stats: { 洞察: 2, 胆识: 2, 共情: 2 },
-  inventory: ['铜钥匙'],
-  flags: { met_landlady: true },
-  lastCheck: { attribute: '洞察', roll: 5, total: 7, dc: 8, success: false },
-  ending: null,
+function card(name: string, overrides: Partial<CharacterCard['data']> = {}): CharacterCard {
+  const data = {
+    name,
+    description: `${name}的设定`,
+    personality: `${name}的性格`,
+    scenario: '',
+    first_mes: '',
+    mes_example: '',
+    creator_notes: '',
+    system_prompt: '',
+    post_history_instructions: '',
+    alternate_greetings: [],
+    tags: [],
+    creator: '',
+    character_version: '',
+    extensions: {},
+    ...overrides,
+  }
+  return {
+    spec: 'chara_card_v2',
+    spec_version: '2.0',
+    data,
+    name: data.name,
+    description: data.description,
+    personality: data.personality,
+    scenario: data.scenario,
+    first_mes: data.first_mes,
+    mes_example: data.mes_example,
+  }
 }
 
 describe('buildMessages 组装顺序', () => {
-  it('system：契约 → agent.md → 世界 → 状态，顺序固定', () => {
+  it('system：契约 → agent.md → 演员表 → 视角，顺序固定', () => {
     const messages = buildMessages({
-      agentMd: '【AGENT】按门规行事。',
-      world,
-      state,
+      agentMd: '【AGENT】雨夜，旧书店。',
+      cast: [card('沈砚')],
+      perspective: '第三人称限知',
       memory: '',
       history: [],
-      playerInput: '推门',
+      outline: '沈砚听见了敲门声。',
     })
     expect(messages[0].role).toBe('system')
     const text = messages[0].content ?? ''
     expect(text.startsWith(CONTRACT)).toBe(true)
 
-    const order = ['【AGENT】按门规行事。', '引擎身份：雾港引擎', '当前状态（以 state.json 为准）']
+    // 契约正文里也提到「【演员表】」「【视角】」，所以用只在目标段出现的标记定位。
+    const order = ['【AGENT】雨夜，旧书店。', '## 沈砚', '【视角】\n第三人称限知']
     const positions = order.map((part) => text.indexOf(part))
     expect(positions.every((position) => position > 0)).toBe(true)
     expect([...positions].sort((a, b) => a - b)).toEqual(positions)
   })
 
-  it('user：摘要 → 最近剧情 → 玩家输入', () => {
+  it('user：摘要 → 最近情节 → 角色附注 → 本回合大纲', () => {
     const messages = buildMessages({
       agentMd: '',
-      world,
-      state,
+      cast: [card('沈砚', { post_history_instructions: '别用感叹号。' })],
+      perspective: '第三人称限知',
       memory: '你曾在码头见过一只黑猫。',
       history: [
-        { role: 'player', text: '我走进门厅' },
-        { role: 'engine', text: '门轴响了。' },
+        { role: 'director', text: '沈砚翻着账本。' },
+        { role: 'narrative', text: '门轴发出一声干涩的呻吟。' },
       ],
-      playerInput: '我推开书房的门',
+      outline: '有人敲门。',
     })
     const user = messages[1].content ?? ''
-    expect(user.indexOf('【更早剧情（摘要 + 索引）】')).toBe(0)
-    expect(user.indexOf('最近剧情')).toBeGreaterThan(user.indexOf('【更早剧情（摘要 + 索引）】'))
-    expect(user.lastIndexOf('【玩家本回合行动】')).toBeGreaterThan(user.indexOf('最近剧情'))
+    const order = [
+      '【更早情节（摘要）】',
+      '【最近情节】',
+      '导演：沈砚翻着账本。',
+      '门轴发出一声干涩的呻吟。',
+      '【角色附注】',
+      '【本回合大纲】',
+      '有人敲门。',
+    ]
+    const positions = order.map((part) => user.indexOf(part))
+    expect(positions.every((position) => position >= 0)).toBe(true)
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions)
   })
 
-  it('没有 agentMd 时 system 只有契约、世界、状态', () => {
+  it('没有 agentMd 时 system 直接从演员表开始', () => {
     const messages = buildMessages({
       agentMd: '',
-      world,
-      state,
+      cast: [card('沈砚')],
+      perspective: '第一人称',
       memory: '',
       history: [],
-      playerInput: '看',
+      outline: '看',
     })
     const text = messages[0].content ?? ''
     expect(text.startsWith(CONTRACT)).toBe(true)
-    expect(text).toContain('引擎身份：雾港引擎')
-    expect(text).not.toContain('【AGENT】')
+    expect(text).toContain('【演员表】')
+    expect(text).toContain('【视角】\n第一人称')
+  })
+
+  it('没有角色卡时演员表给占位说明，不产生空的 ## 段', () => {
+    const block = castBlock([])
+    expect(block).toContain('【演员表】')
+    expect(block).toContain('没有角色卡')
+    expect(block).not.toContain('##')
+  })
+
+  it('卡里空字段整段略过', () => {
+    const block = castBlock([card('沈砚', { description: '', personality: '嘴硬心软' })])
+    expect(block).not.toContain('人物设定：')
+    expect(block).toContain('性格：嘴硬心软')
   })
 })
 

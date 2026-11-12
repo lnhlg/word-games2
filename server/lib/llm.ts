@@ -1,6 +1,6 @@
 import OpenAI from 'openai'
 import type { ChatMessage } from './prompt'
-import { TOOL_SCHEMAS } from './tools'
+import type { Effort, ReasoningParam } from './providers'
 
 export interface LlmChunk {
   type: 'delta' | 'tool_call' | 'done'
@@ -12,6 +12,17 @@ export interface LlmChunk {
 export interface LlmParams {
   model: string
   messages: ChatMessage[]
+  /** 供应商凭据；缺省时回退 .env（旧工作区兼容）。 */
+  baseUrl?: string
+  apiKey?: string
+  /** 已解析的思考强度；null/缺省表示不传 reasoning_effort（关闭时由 supportsReasoning 决定是否发 thinking: disabled）。 */
+  reasoningEffort?: Effort | null
+  /** 所选模型是否声明了思考强度档位；为 true 时总会发送 thinking 参数。 */
+  supportsReasoning?: boolean
+  /** 上游参数名；Gemini 系列为 thinking_level，其余 reasoning_effort。 */
+  reasoningParam?: ReasoningParam
+  /** 工具定义；不传就不向上游声明工具（小说回合不需要工具）。 */
+  tools?: unknown[]
 }
 
 export type LlmRunner = (params: LlmParams) => AsyncGenerator<LlmChunk>
@@ -27,20 +38,53 @@ export function getLlmRunner(): LlmRunner {
   return override ?? realRunner
 }
 
-const realRunner: LlmRunner = async function* ({ model, messages }) {
-  const apiKey = process.env.LLM_API_KEY
-  if (!apiKey) throw new Error('缺少 LLM_API_KEY，请在 .env 里配置')
+interface ChatStreamChunk {
+  choices: Array<{
+    delta?: {
+      content?: string | null
+      tool_calls?: Array<{
+        index?: number
+        id?: string
+        function?: { name?: string; arguments?: string }
+      }>
+    }
+    finish_reason?: string | null
+  }>
+}
+
+const realRunner: LlmRunner = async function* (params) {
+  const { model, messages, reasoningEffort, supportsReasoning, tools } = params
+  const reasoningParam = params.reasoningParam ?? 'reasoning_effort'
+  const apiKey = params.apiKey || process.env.LLM_API_KEY
+  if (!apiKey) throw new Error('缺少 API key：请在设置里配置供应商，或在 .env 里配置 LLM_API_KEY')
   const client = new OpenAI({
     apiKey,
-    baseURL: process.env.LLM_BASE_URL || undefined,
+    baseURL: params.baseUrl || process.env.LLM_BASE_URL || undefined,
   })
 
-  const stream = await client.chat.completions.create({
+  // DeepSeek 只接受 low/high/max，medium 需折算为 high；Gemini 用 thinking_level 直传。
+  const upstreamEffort =
+    reasoningParam === 'thinking_level' || !reasoningEffort
+      ? reasoningEffort
+      : reasoningEffort === 'medium'
+        ? 'high'
+        : reasoningEffort
+
+  const stream = (await client.chat.completions.create({
     model,
     messages: messages as never,
-    tools: TOOL_SCHEMAS as never,
+    ...(tools?.length ? { tools: tools as never } : {}),
     stream: true,
-  })
+    ...(reasoningParam === 'thinking_level'
+      ? upstreamEffort
+        ? { thinking_level: upstreamEffort }
+        : {}
+      : {
+          // DeepSeek 思考模式默认开启：声明支持强度的模型必须显式开关，关闭时传 disabled。
+          ...(supportsReasoning ? { thinking: { type: upstreamEffort ? 'enabled' : 'disabled' } } : {}),
+          ...(upstreamEffort ? { reasoning_effort: upstreamEffort } : {}),
+        }),
+  } as never)) as unknown as AsyncIterable<ChatStreamChunk>
 
   const pending: Record<number, { id: string; name: string; args: string }> = {}
 

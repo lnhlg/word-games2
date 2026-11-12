@@ -1,6 +1,7 @@
 node_modules
 dist
 .env
+providers.json
 sessions/
 .pnpm-store/
 *.log

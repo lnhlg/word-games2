@@ -7,13 +7,10 @@ import {
   pendingTurns,
   readMemories,
   rememberBatch,
-  searchMemories,
   setMemoryRunner,
+  transcriptOf,
   type MemoryRecord,
 } from '../lib/memory'
-import { executeTool } from '../lib/tools'
-import type { GameState } from '../lib/session-fs'
-import type { World } from '../lib/world'
 
 function makeDir(messages: unknown[]): string {
   const dir = mkdtempSync(path.join(tmpdir(), 'wg-memory-'))
@@ -25,39 +22,19 @@ function makeDir(messages: unknown[]): string {
   return dir
 }
 
-const playerLine = (turn: number, text: string) => ({
-  role: 'player',
+const directorLine = (turn: number, text: string) => ({
+  role: 'director',
   turn,
   at: '2026-11-12T00:00:00.000Z',
   text,
 })
 
-const engineLine = (turn: number, text: string) => ({
-  role: 'engine',
+const narrativeLine = (turn: number, text: string) => ({
+  role: 'narrative',
   turn,
   at: '2026-11-12T00:00:01.000Z',
-  kind: 'text',
   text,
 })
-
-const world: World = {
-  engine: { name: '测试引擎', tone: '克制', boundaries: [] },
-  opening: '',
-  scenes: [],
-  endings: [],
-  raw: '',
-}
-
-const state: GameState = {
-  turn: 0,
-  scene: 'hallway',
-  location: 'hallway',
-  stats: { 洞察: 2, 胆识: 2, 共情: 2 },
-  inventory: [],
-  flags: {},
-  lastCheck: null,
-  ending: null,
-}
 
 afterEach(() => {
   setMemoryRunner(null)
@@ -81,11 +58,25 @@ describe('memory 时机', () => {
   })
 })
 
-describe('摘要 + 索引', () => {
+describe('transcript 与摘要', () => {
+  it('transcriptOf 保留导演大纲，情节原文照抄', () => {
+    const dir = makeDir([directorLine(0, '推门进去'), narrativeLine(0, '门轴发出一声干涩的呻吟。')])
+    const text = transcriptOf(
+      [
+        { role: 'director', turn: 0, at: '', text: '推门进去' },
+        { role: 'narrative', turn: 0, at: '', text: '门轴发出一声干涩的呻吟。' },
+      ],
+      [0, 0],
+    )
+    expect(text).toContain('导演：推门进去')
+    expect(text).toContain('门轴发出一声干涩的呻吟。')
+    expect(dir).toBeTruthy()
+  })
+
   it('rememberBatch 生成摘要与关键词并落盘', async () => {
-    const dir = makeDir([playerLine(0, '我推开书房的门'), engineLine(0, '门轴响了。')])
+    const dir = makeDir([directorLine(0, '我推开书房的门'), narrativeLine(0, '门轴响了。')])
     setMemoryRunner(async () => ({
-      summary: '玩家进入书房。',
+      summary: '沈砚走进书房。',
       keywords: ['书房', '门轴'],
       entities: ['书房'],
     }))
@@ -93,42 +84,13 @@ describe('摘要 + 索引', () => {
     expect(record?.turns).toEqual([0, 0])
     expect(record?.keywords).toContain('书房')
     expect(readMemories(dir)).toHaveLength(1)
-    expect(memoryBlock([record!])).toContain('回合 1–1：玩家进入书房。')
+    expect(memoryBlock([record!])).toContain('回合 1–1：沈砚走进书房。')
     expect(memoryBlock([record!])).toContain('关键词：书房、门轴')
   })
 
-  it('searchMemories 命中索引后取回对应原文', () => {
-    const dir = makeDir([playerLine(0, '我推开书房的门'), engineLine(0, '门轴发出一声干涩的呻吟。')])
-    const memories: MemoryRecord[] = [
-      { id: 'm0-0', turns: [0, 0], summary: '玩家进入书房。', keywords: ['书房'], entities: [], createdAt: '' },
-    ]
-    const hits = searchMemories(dir, memories, '书房')
-    expect(hits).toHaveLength(1)
-    expect(hits[0].excerpt).toContain('门轴发出一声干涩的呻吟')
-  })
-})
-
-describe('recall 工具', () => {
-  const memories: MemoryRecord[] = [
-    { id: 'm0-0', turns: [0, 0], summary: '玩家进入书房。', keywords: ['书房'], entities: ['沈砚'], createdAt: '' },
-  ]
-
-  it('按关键词命中', () => {
-    const dir = makeDir([playerLine(0, '我推开书房的门'), engineLine(0, '门轴发出一声干涩的呻吟。')])
-    const outcome = executeTool('recall', { query: '书房' }, { world, state, dir, memories })
-    expect(outcome.ok).toBe(true)
-    expect(JSON.stringify(outcome.result)).toContain('门轴')
-  })
-
-  it('按回合范围直接取原文', () => {
-    const dir = makeDir([playerLine(0, '我推开书房的门'), engineLine(0, '门轴发出一声干涩的呻吟。')])
-    const outcome = executeTool('recall', { turns: [0, 0] }, { world, state, dir, memories })
-    expect(outcome.ok).toBe(true)
-    expect(JSON.stringify(outcome.result)).toContain('门轴')
-  })
-
-  it('没有参数时失败', () => {
-    const outcome = executeTool('recall', {}, { world, state, dir: makeDir([]), memories })
-    expect(outcome.ok).toBe(false)
+  it('没到时机时不写记忆文件', async () => {
+    const dir = makeDir([directorLine(0, '第一幕'), narrativeLine(0, '灯亮了。')])
+    expect(await rememberBatch(dir, [], 1)).toBeNull()
+    expect(readMemories(dir)).toHaveLength(0)
   })
 })

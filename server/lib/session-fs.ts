@@ -1,87 +1,53 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
+import { defaultSelection, type Effort } from './providers'
 
 export interface SessionMeta {
   id: string
   title: string
   model: string
+  /** 选用的供应商；缺省时按模型名唯一匹配，再回退 default。 */
+  providerId?: string
+  /** 本会话的思考强度；缺省/null 表示关闭。 */
+  reasoningEffort?: Effort | null
+  /** 本场的默认叙述视角；自由文本，缺省按第三人称限知处理。 */
+  perspective?: string
+  /** 参演角色卡的 id；空数组表示一场没有角色的独白。 */
+  cast?: string[]
   createdAt: string
   updatedAt: string
   turn: number
   status: 'active' | 'ended' | 'archived'
-  /** 回滚记录：每次回滚记下 (回滚到的回合, 回滚时刻)；此前的分叉消息按它过滤。 */
-  discarded?: { turn: number; at: string }[]
-}
-
-export interface CheckResult {
-  attribute: string
-  roll: number
-  total: number
-  dc: number
-  success: boolean
-}
-
-export interface GameState {
-  turn: number
-  scene: string
-  location: string
-  stats: Record<string, number>
-  inventory: string[]
-  flags: Record<string, boolean>
-  lastCheck: CheckResult | null
-  ending: string | null
 }
 
 export type MessageRecord =
-  | { role: 'player'; turn: number; at: string; text: string }
-  | { role: 'engine'; turn: number; at: string; kind: 'text'; text: string }
-  | { role: 'engine'; turn: number; at: string; kind: 'tool_call'; id: string; name: string; args: unknown }
-  | { role: 'tool'; turn: number; at: string; callId: string; name: string; ok: boolean; result: unknown }
-  | { role: 'engine'; turn: number; at: string; kind: 'options'; options: string[] }
+  | { role: 'director'; turn: number; at: string; text: string }
+  | {
+      role: 'narrative'
+      turn: number
+      at: string
+      text: string
+      interrupted?: boolean
+      /** 导演手动改过这段情节。 */
+      edited?: boolean
+      /** 正文写完后生成的后续剧情选项。 */
+      nextOptions?: string[]
+    }
   | { role: 'system'; at: string; kind: 'error'; text: string }
+
+export const DEFAULT_PERSPECTIVE = '第三人称限知'
 
 /** 默认模型：运行时读 env，设置页改完立刻生效。 */
 export function defaultModel(): string {
   return process.env.DEFAULT_MODEL || 'deepseek-chat'
 }
 
-export const DEFAULT_WORLD = `engine:
-  name: "叙事引擎"
-  tone: "冷峻、克制、第二人称"
-  boundaries:
-    - "不替玩家做决定"
-    - "不剧透未触发的结局"
-opening: "你在雾港旧宅门口醒来，口袋里只有一张对折的纸条。"
-scenes:
-  - id: hallway
-    name: "门厅"
-    exits: [study, parlor]
-  - id: study
-    name: "旧书房"
-    exits: [hallway]
-  - id: parlor
-    name: "会客厅"
-    exits: [hallway]
-endings: []
-`
-
-export const DEFAULT_STATE: GameState = {
-  turn: 0,
-  scene: '门厅',
-  location: 'hallway',
-  stats: { 洞察: 2, 胆识: 2, 共情: 2 },
-  inventory: [],
-  flags: {},
-  lastCheck: null,
-  ending: null,
-}
-
 const DEFAULT_AGENT = `# AGENT.md
 
-你正在主持一局互动小说。这份文件由玩家自由编写，引擎不会解析它的结构。
+这场戏的全场通用指令，对全部参演角色生效。代码不会解析它的结构。
 
-可以写：叙事风格、禁忌、节奏要求、语言习惯。
-模型专属指令请放在 \`<模型名>.md\` 里（存在时优先于本文件）。
+可以写：文风、禁忌、节奏、语言习惯、整体氛围。
+人物设定请写进各自的角色卡，这里只放全场共用的东西。
 `
 
 const pad = (n: number) => String(n).padStart(2, '0')
@@ -99,18 +65,26 @@ export function newSessionId(root: string): string {
   return id
 }
 
-/** 在工作区目录下开一局新的会话；会话是工作区里含 session.json 的子目录。 */
-export function createSession(root: string): SessionMeta {
+/** 一场戏 = 工作区里一个含 session.json 的子目录。 */
+export function createSession(
+  root: string,
+  input: { title?: string; cast?: string[]; perspective?: string } = {},
+): SessionMeta {
   mkdirSync(root, { recursive: true })
   const id = newSessionId(root)
   const dir = path.join(root, id)
-  mkdirSync(path.join(dir, 'snapshots'), { recursive: true })
+  mkdirSync(dir, { recursive: true })
 
   const now = new Date().toISOString()
+  const defaults = defaultSelection()
   const meta: SessionMeta = {
     id,
-    title: '未命名的一局',
-    model: defaultModel(),
+    title: input.title?.trim() ? input.title.trim().slice(0, 80) : '未命名的一场戏',
+    model: defaults.model,
+    ...(defaults.providerId ? { providerId: defaults.providerId } : {}),
+    ...(defaults.effort ? { reasoningEffort: defaults.effort } : {}),
+    perspective: input.perspective?.trim() || DEFAULT_PERSPECTIVE,
+    cast: input.cast ?? [],
     createdAt: now,
     updatedAt: now,
     turn: 0,
@@ -119,20 +93,27 @@ export function createSession(root: string): SessionMeta {
 
   writeFileSync(path.join(dir, 'session.json'), JSON.stringify(meta, null, 2) + '\n', 'utf8')
   writeFileSync(path.join(dir, 'AGENT.md'), DEFAULT_AGENT, 'utf8')
-  writeFileSync(path.join(dir, 'world.yaml'), DEFAULT_WORLD, 'utf8')
-  writeFileSync(path.join(dir, 'state.json'), JSON.stringify(DEFAULT_STATE, null, 2) + '\n', 'utf8')
   writeFileSync(path.join(dir, 'messages.jsonl'), '', 'utf8')
 
   return meta
+}
+
+/**
+ * 旧格式（互动小说时代）的会话带 state.json 或 world.yaml；
+ * 它们留在磁盘上，但不进新列表。
+ */
+export function isLegacySession(dir: string): boolean {
+  return existsSync(path.join(dir, 'state.json')) || existsSync(path.join(dir, 'world.yaml'))
 }
 
 export function listSessions(root: string): SessionMeta[] {
   if (!existsSync(root)) return []
   const out: SessionMeta[] = []
   for (const entry of readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue
-    const file = path.join(root, entry.name, 'session.json')
-    if (!existsSync(file)) continue
+    if (!entry.isDirectory() || entry.name === 'characters') continue
+    const dir = path.join(root, entry.name)
+    const file = path.join(dir, 'session.json')
+    if (!existsSync(file) || isLegacySession(dir)) continue
     try {
       out.push(JSON.parse(readFileSync(file, 'utf8')) as SessionMeta)
     } catch {
@@ -150,41 +131,115 @@ export function writeMeta(dir: string, meta: SessionMeta): void {
   writeFileSync(path.join(dir, 'session.json'), JSON.stringify(meta, null, 2) + '\n', 'utf8')
 }
 
-export function readState(dir: string): GameState {
-  const file = path.join(dir, 'state.json')
-  if (!existsSync(file)) return JSON.parse(JSON.stringify(DEFAULT_STATE)) as GameState
-  return JSON.parse(readFileSync(file, 'utf8')) as GameState
-}
-
-export function writeState(dir: string, state: GameState): void {
-  writeFileSync(path.join(dir, 'state.json'), JSON.stringify(state, null, 2) + '\n', 'utf8')
-}
-
 export function appendMessage(dir: string, msg: MessageRecord): void {
   writeFileSync(path.join(dir, 'messages.jsonl'), JSON.stringify(msg) + '\n', { flag: 'a', encoding: 'utf8' })
 }
 
+/** 只返回新格式记录；旧文件里的 player/engine/tool 行读取时忽略。 */
 export function readMessages(dir: string): MessageRecord[] {
   const file = path.join(dir, 'messages.jsonl')
   if (!existsSync(file)) return []
-  return readFileSync(file, 'utf8')
-    .split('\n')
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as MessageRecord)
+  const out: MessageRecord[] = []
+  for (const line of readFileSync(file, 'utf8').split('\n')) {
+    if (!line.trim()) continue
+    try {
+      const parsed = JSON.parse(line) as { role?: unknown }
+      if (parsed.role === 'director' || parsed.role === 'narrative' || parsed.role === 'system') {
+        out.push(parsed as MessageRecord)
+      }
+    } catch {
+      // 坏行跳过，不阻塞会话。
+    }
+  }
+  return out
 }
 
-export function writeSnapshot(dir: string, turn: number, state: GameState): void {
-  mkdirSync(path.join(dir, 'snapshots'), { recursive: true })
-  writeFileSync(
-    path.join(dir, 'snapshots', `${turn}.json`),
-    JSON.stringify({ ...state, turn }, null, 2) + '\n',
-    'utf8',
-  )
+/**
+ * 原地改写整个消息文件：先写临时文件再 rename，避免进程中断留下半截 JSONL。
+ * messages.jsonl 从"只追加"改成"可原地改写"见 docs/adr/0001-turn-rewriting.md。
+ */
+export function writeMessages(dir: string, messages: MessageRecord[]): void {
+  const file = path.join(dir, 'messages.jsonl')
+  const tmp = `${file}.tmp`
+  const body = messages.map((message) => JSON.stringify(message)).join('\n')
+  writeFileSync(tmp, messages.length ? `${body}\n` : '', 'utf8')
+  renameSync(tmp, file)
+}
+
+/** 去掉某一回合的全部记录（导演大纲 + 情节）；系统错误记录不归属回合，保留。 */
+export function withoutTurn(messages: MessageRecord[], turn: number): MessageRecord[] {
+  return messages.filter((message) => message.role === 'system' || message.turn !== turn)
+}
+
+/** 只去掉某一回合的情节，保留大纲（重新生成时先清旧稿）。 */
+export function withoutNarrative(messages: MessageRecord[], turn: number): MessageRecord[] {
+  return messages.filter((message) => !(message.role === 'narrative' && message.turn === turn))
+}
+
+/** 把某一回合的情节换成新文本，标记已编辑，并作废该回合的选项。 */
+export function withEditedNarrative(
+  messages: MessageRecord[],
+  turn: number,
+  text: string,
+): { messages: MessageRecord[]; found: boolean } {
+  let found = false
+  const next = messages.map((message) => {
+    if (message.role !== 'narrative' || message.turn !== turn) return message
+    found = true
+    return { ...message, text, edited: true, nextOptions: undefined }
+  })
+  return { messages: next, found }
+}
+
+/** 给某一回合的情节挂上后续选项。 */
+export function withNextOptions(
+  messages: MessageRecord[],
+  turn: number,
+  options: string[],
+): { messages: MessageRecord[]; found: boolean } {
+  let found = false
+  const next = messages.map((message) => {
+    if (message.role !== 'narrative' || message.turn !== turn) return message
+    found = true
+    return { ...message, nextOptions: options }
+  })
+  return { messages: next, found }
+}
+
+/** 删除最后一回合；该回合没有任何记录时返回 false。 */
+export function deleteTurnFiles(dir: string, turn: number): boolean {
+  const messages = readMessages(dir)
+  if (!messages.some((message) => message.role !== 'system' && message.turn === turn)) return false
+  writeMessages(dir, withoutTurn(messages, turn))
+  return true
+}
+
+/** 改写某一回合的情节原文；该回合没有落盘情节时返回 false。 */
+export function editNarrativeFile(dir: string, turn: number, text: string): boolean {
+  const { messages, found } = withEditedNarrative(readMessages(dir), turn, text)
+  if (!found) return false
+  writeMessages(dir, messages)
+  return true
+}
+
+/** 写回某一回合的后续选项；该回合没有落盘情节时返回 false。 */
+export function saveNextOptions(dir: string, turn: number, options: string[]): boolean {
+  const { messages, found } = withNextOptions(readMessages(dir), turn, options)
+  if (!found) return false
+  writeMessages(dir, messages)
+  return true
 }
 
 export function patchMeta(
   dir: string,
-  patch: { title?: string; status?: SessionMeta['status']; model?: string },
+  patch: {
+    title?: string
+    status?: SessionMeta['status']
+    model?: string
+    providerId?: string | null
+    reasoningEffort?: Effort | null
+    perspective?: string
+  },
 ): SessionMeta {
   const meta = readMeta(dir)
   if (patch.title !== undefined) {
@@ -193,6 +248,17 @@ export function patchMeta(
   }
   if (patch.status !== undefined) meta.status = patch.status
   if (patch.model !== undefined && patch.model.trim()) meta.model = patch.model.trim()
+  if (patch.providerId !== undefined) {
+    if (patch.providerId && patch.providerId.trim()) meta.providerId = patch.providerId.trim()
+    else delete meta.providerId
+  }
+  if (patch.reasoningEffort !== undefined) {
+    if (patch.reasoningEffort) meta.reasoningEffort = patch.reasoningEffort
+    else delete meta.reasoningEffort
+  }
+  if (patch.perspective !== undefined && patch.perspective.trim()) {
+    meta.perspective = patch.perspective.trim()
+  }
   meta.updatedAt = new Date().toISOString()
   writeMeta(dir, meta)
   return meta
@@ -213,91 +279,53 @@ function clockOf(iso: string): string {
   return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
 }
 
-/** 把一局导出为 Markdown：元信息、世界、全部回合、最终状态。 */
-export function exportMarkdown(
-  dir: string,
-  meta: SessionMeta,
-  messages: MessageRecord[],
-  state: GameState,
-): string {
-  const worldFile = path.join(dir, 'world.yaml')
-  const world = existsSync(worldFile) ? readFileSync(worldFile, 'utf8').trim() : ''
-  const statusText = meta.status === 'ended' ? '已结束' : meta.status === 'archived' ? '已归档' : '进行中'
+/** 把一场戏导出为 Markdown 小说：元信息 + 回合大纲与情节。 */
+export function exportMarkdown(meta: SessionMeta, messages: MessageRecord[]): string {
+  const statusText = meta.status === 'ended' ? '已落笔' : meta.status === 'archived' ? '已归档' : '进行中'
   const lines: string[] = [
     `# ${meta.title}`,
     '',
     `- 会话：\`${meta.id}\``,
     `- 模型：${meta.model}`,
+    ...(meta.providerId ? [`- 供应商：${meta.providerId}`] : []),
+    `- 视角：${meta.perspective ?? DEFAULT_PERSPECTIVE}`,
+    `- 参演：${(meta.cast ?? []).join('、') || '（无）'}`,
     `- 回合：${meta.turn}`,
     `- 状态：${statusText}`,
     `- 创建：${meta.createdAt}`,
     `- 更新：${meta.updatedAt}`,
     '',
+    '## 剧情',
+    '',
   ]
-  if (world) lines.push('## 世界', '', '```yaml', world, '```', '')
 
-  lines.push('## 剧情', '')
   let currentTurn = -1
   for (const m of messages) {
-    if ('turn' in m && m.turn !== currentTurn) {
-      currentTurn = m.turn
-      const clock = m.role === 'player' ? clockOf(m.at) : ''
-      lines.push(`### 回合 ${currentTurn + 1}${clock ? ` · ${clock}` : ''}`, '')
+    if (m.role === 'system') {
+      lines.push(`> 系统：${m.text}`, '')
+      continue
     }
-    if (m.role === 'player') lines.push(`> **玩家**：${m.text}`, '')
-    else if (m.role === 'engine' && m.kind === 'text') lines.push(m.text, '')
-    else if (m.role === 'engine' && m.kind === 'tool_call')
-      lines.push(`- 工具 \`${m.name}\`：\`${JSON.stringify(m.args)}\``, '')
-    else if (m.role === 'tool') lines.push(`  - 结果：\`${JSON.stringify(m.result)}\``, '')
-    else if (m.role === 'engine' && m.kind === 'options') lines.push(`- 选项：${m.options.join(' / ')}`, '')
-    else if (m.role === 'system') lines.push(`- 系统：${m.text}`, '')
+    if (m.turn !== currentTurn) {
+      currentTurn = m.turn
+      const clock = clockOf(m.at)
+      lines.push(`### 第 ${currentTurn + 1} 回合${clock ? ` · ${clock}` : ''}`, '')
+    }
+    if (m.role === 'director') {
+      lines.push(`> **导演**：${m.text}`, '')
+    } else if (m.role === 'narrative') {
+      lines.push(m.text + (m.interrupted ? '（此回合生成被中断）' : ''), '')
+    }
   }
 
-  lines.push('## 最终状态', '', '```json', JSON.stringify(state, null, 2), '```', '')
   return lines.join('\n')
-}
-
-/** 回滚之后，被回滚分支里在回滚时刻之前产生的消息不再展示；messages.jsonl 本身不动。 */
-export function visibleMessages(messages: MessageRecord[], meta: SessionMeta): MessageRecord[] {
-  const discarded = meta.discarded ?? []
-  if (discarded.length === 0) return messages
-  return messages.filter((message) => {
-    if (!('turn' in message)) return true
-    return !discarded.some((cut) => message.turn > cut.turn && message.at <= cut.at)
-  })
-}
-
-export interface RollbackResult {
-  meta: SessionMeta
-  state: GameState
-  messages: MessageRecord[]
-}
-
-/** 把 state 恢复到 snapshots/<turn>.json；messages.jsonl 只追加不回写。 */
-export function rollbackSession(dir: string, turn: number): RollbackResult | null {
-  const file = path.join(dir, 'snapshots', `${turn}.json`)
-  if (!existsSync(file)) return null
-
-  const snapshot = JSON.parse(readFileSync(file, 'utf8')) as GameState
-  const state: GameState = { ...snapshot, turn: turn + 1 }
-  writeState(dir, state)
-
-  const meta = readMeta(dir)
-  meta.turn = turn + 1
-  meta.status = state.ending ? 'ended' : 'active'
-  meta.updatedAt = new Date().toISOString()
-  meta.discarded = [...(meta.discarded ?? []), { turn, at: meta.updatedAt }]
-  writeMeta(dir, meta)
-
-  return { meta, state, messages: visibleMessages(readMessages(dir), meta) }
 }
 
 export function readSession(
   root: string,
   id: string,
-): { meta: SessionMeta; messages: MessageRecord[]; state: GameState } | null {
+): { meta: SessionMeta; messages: MessageRecord[] } | null {
   const dir = sessionDir(root, id)
-  if (!existsSync(path.join(dir, 'session.json'))) return null
+  if (!existsSync(path.join(dir, 'session.json')) || isLegacySession(dir)) return null
   const meta = readMeta(dir)
-  return { meta, messages: visibleMessages(readMessages(dir), meta), state: readState(dir) }
+  return { meta, messages: readMessages(dir) }
 }
