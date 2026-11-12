@@ -84,7 +84,11 @@ export async function runTurn(args: RunTurnArgs): Promise<void> {
     messages.push({
       role: 'assistant',
       content: text || null,
-      tool_calls: calls.map((c) => ({ id: c.id, name: c.name, args: c.args })),
+      tool_calls: calls.map((c) => ({
+        id: c.id,
+        type: 'function' as const,
+        function: { name: c.name, arguments: c.args },
+      })),
     })
 
     for (const call of calls) {

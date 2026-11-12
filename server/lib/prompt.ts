@@ -12,8 +12,8 @@ export const CONTRACT = `你是互动小说（Interactive Fiction）的叙事引
 
 export interface ChatToolCall {
   id: string
-  name: string
-  args: string
+  type: 'function'
+  function: { name: string; arguments: string }
 }
 
 export type ChatMessage =

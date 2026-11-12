@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent, type KeyboardEvent } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
 import { useApp, type ToolCard } from './store'
 import type { MessageRecord } from './types'
 
@@ -17,29 +17,57 @@ interface DisplayItem {
   kind: 'player' | 'engine' | 'tool' | 'system'
   text?: string
   tool?: ToolCard
+  turn?: number
+  at?: string
+}
+
+/** 回合分隔线的时间戳：HH:mm */
+function clockTime(iso?: string): string {
+  if (!iso) return ''
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return ''
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+}
+
+const TOOL_LABELS: Record<string, string> = {
+  move_to: '移动',
+  lookup_lore: '查阅',
+  roll_check: '判定',
+  set_flag: '标记',
+  add_item: '获得',
+  remove_item: '失去',
+  trigger_ending: '结局',
+  end_turn: '结束回合',
 }
 
 function toDisplay(messages: MessageRecord[]): DisplayItem[] {
   const items: DisplayItem[] = []
   const toolIndex = new Map<string, number>()
+  const turnAt = new Map<number, string>()
+  for (const message of messages) {
+    if (message.role === 'player' && !turnAt.has(message.turn)) turnAt.set(message.turn, message.at)
+  }
 
   messages.forEach((message, index) => {
+    const at = 'turn' in message ? turnAt.get(message.turn) : undefined
     if (message.role === 'player') {
-      items.push({ key: `p-${index}`, kind: 'player', text: message.text })
+      items.push({ key: `p-${index}`, kind: 'player', text: message.text, turn: message.turn, at })
     } else if (message.role === 'engine' && message.kind === 'text') {
-      items.push({ key: `e-${index}`, kind: 'engine', text: message.text })
+      items.push({ key: `e-${index}`, kind: 'engine', text: message.text, turn: message.turn, at })
     } else if (message.role === 'engine' && message.kind === 'tool_call') {
       items.push({
         key: `t-${index}`,
         kind: 'tool',
         tool: { id: message.id, name: message.name, args: message.args },
+        turn: message.turn,
+        at,
       })
       toolIndex.set(message.id, items.length - 1)
     } else if (message.role === 'tool') {
-      const at = toolIndex.get(message.callId)
-      if (at !== undefined) {
-        const previous = items[at]
-        items[at] = { ...previous, tool: { ...previous.tool!, ok: message.ok, result: message.result } }
+      const hit = toolIndex.get(message.callId)
+      if (hit !== undefined) {
+        const previous = items[hit]
+        items[hit] = { ...previous, tool: { ...previous.tool!, ok: message.ok, result: message.result } }
       }
     } else if (message.role === 'engine' && message.kind === 'options') {
       // 选项条单独渲染在 composer 上方，这里不重复
@@ -78,7 +106,9 @@ function ToolCardView({ tool }: { tool: ToolCard }) {
         className="flex w-full items-center gap-2 px-3 py-2 text-left"
       >
         <span className="shrink-0">{tool.ok === false ? '❌' : tool.ok ? '✅' : '⏳'}</span>
-        <span className="shrink-0 font-medium text-neutral-700">{tool.name}</span>
+        <span className="shrink-0 font-medium text-neutral-700" title={tool.name}>
+          {TOOL_LABELS[tool.name] ?? tool.name}
+        </span>
         <span className="min-w-0 flex-1 truncate text-neutral-500">{toolSummary(tool)}</span>
         <span className="shrink-0 text-neutral-400">{open ? '▾' : '▸'}</span>
       </button>
@@ -135,6 +165,13 @@ export default function App() {
   }, [load])
 
   const items = useMemo(() => toDisplay(messages), [messages])
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const composerRef = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [items, streamText, liveTools])
 
   const lastOptions = useMemo(() => {
     if (options.length > 0) return options
@@ -156,6 +193,7 @@ export default function App() {
     if (!text) return
     setDraft('')
     await send(text)
+    composerRef.current?.focus()
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -291,7 +329,7 @@ export default function App() {
           )}
         </header>
 
-        <div className="flex-1 overflow-y-auto px-5 py-6">
+        <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-6">
           {!currentWorkspace && (
             <div className="mx-auto mt-16 max-w-md text-center text-sm text-neutral-400">
               还没有工作区。工作区是磁盘上的一个目录，像 DSH 一样先打开它，再在里面新建会话。
@@ -310,30 +348,38 @@ export default function App() {
 
           {current && (
             <div className="mx-auto max-w-2xl space-y-3">
-              {items.map((item) => {
-                if (item.kind === 'player') {
-                  return (
-                    <div key={item.key} className="flex justify-end">
-                      <div className="max-w-[80%] rounded-2xl rounded-br-sm bg-neutral-900 px-4 py-2.5 text-sm text-white whitespace-pre-wrap">
+              {items.map((item, index) => {
+                const showDivider =
+                  item.turn !== undefined && item.turn !== items[index - 1]?.turn
+                return (
+                  <Fragment key={item.key}>
+                    {showDivider && (
+                      <div className="flex items-center gap-3 py-2 text-[11px] text-neutral-400">
+                        <span className="h-px flex-1 bg-neutral-200" />
+                        <span>
+                          回合 {(item.turn ?? 0) + 1}
+                          {clockTime(item.at) ? ` · ${clockTime(item.at)}` : ''}
+                        </span>
+                        <span className="h-px flex-1 bg-neutral-200" />
+                      </div>
+                    )}
+                    {item.kind === 'player' && (
+                      <div className="flex justify-end">
+                        <div className="max-w-[80%] rounded-2xl rounded-br-sm border border-neutral-200 bg-neutral-100 px-4 py-2.5 text-sm text-neutral-900 whitespace-pre-wrap">
+                          {item.text}
+                        </div>
+                      </div>
+                    )}
+                    {item.kind === 'tool' && item.tool && <ToolCardView tool={item.tool} />}
+                    {item.kind === 'system' && (
+                      <div className="rounded-md bg-red-50 px-3 py-2 text-xs text-red-700">{item.text}</div>
+                    )}
+                    {item.kind === 'engine' && (
+                      <div className="whitespace-pre-wrap text-sm leading-relaxed text-neutral-800">
                         {item.text}
                       </div>
-                    </div>
-                  )
-                }
-                if (item.kind === 'tool' && item.tool) {
-                  return <ToolCardView key={item.key} tool={item.tool} />
-                }
-                if (item.kind === 'system') {
-                  return (
-                    <div key={item.key} className="rounded-md bg-red-50 px-3 py-2 text-xs text-red-700">
-                      {item.text}
-                    </div>
-                  )
-                }
-                return (
-                  <div key={item.key} className="whitespace-pre-wrap text-sm leading-relaxed text-neutral-800">
-                    {item.text}
-                  </div>
+                    )}
+                  </Fragment>
                 )
               })}
 
@@ -378,6 +424,7 @@ export default function App() {
         <div className="border-t border-neutral-200 p-3">
           <form onSubmit={(event) => void handleSubmit(event)} className="mx-auto max-w-2xl">
             <textarea
+              ref={composerRef}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={handleKeyDown}
