@@ -1,12 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
-export function sessionsDir(): string {
-  return process.env.SESSIONS_DIR
-    ? path.resolve(process.env.SESSIONS_DIR)
-    : path.join(process.cwd(), 'sessions')
-}
-
 export interface SessionMeta {
   id: string
   title: string
@@ -60,19 +54,19 @@ const DEFAULT_AGENT = `# AGENT.md
 
 const pad = (n: number) => String(n).padStart(2, '0')
 
-export function newSessionId(): string {
+export function newSessionId(root: string): string {
   const d = new Date()
   const base = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`
   let id = base
   let i = 2
-  while (existsSync(path.join(sessionsDir(), id))) id = `${base}-${i++}`
+  while (existsSync(path.join(root, id))) id = `${base}-${i++}`
   return id
 }
 
-export function createSession(): SessionMeta {
-  const root = sessionsDir()
+/** 在工作区目录下开一局新的会话；会话是工作区里含 session.json 的子目录。 */
+export function createSession(root: string): SessionMeta {
   mkdirSync(root, { recursive: true })
-  const id = newSessionId()
+  const id = newSessionId(root)
   const dir = path.join(root, id)
   mkdirSync(path.join(dir, 'snapshots'), { recursive: true })
 
@@ -96,8 +90,7 @@ export function createSession(): SessionMeta {
   return meta
 }
 
-export function listSessions(): SessionMeta[] {
-  const root = sessionsDir()
+export function listSessions(root: string): SessionMeta[] {
   if (!existsSync(root)) return []
   const out: SessionMeta[] = []
   for (const entry of readdirSync(root, { withFileTypes: true })) {
@@ -113,8 +106,8 @@ export function listSessions(): SessionMeta[] {
   return out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
 }
 
-export function readSession(id: string): { meta: SessionMeta; messages: unknown[] } | null {
-  const dir = path.join(sessionsDir(), id)
+export function readSession(root: string, id: string): { meta: SessionMeta; messages: unknown[] } | null {
+  const dir = path.join(root, id)
   const file = path.join(dir, 'session.json')
   if (!existsSync(file)) return null
   const meta = JSON.parse(readFileSync(file, 'utf8')) as SessionMeta

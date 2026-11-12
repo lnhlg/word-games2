@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { useApp } from './store'
 
 function relativeTime(iso: string): string {
@@ -12,33 +12,131 @@ function relativeTime(iso: string): string {
 }
 
 export default function App() {
-  const { sessions, currentId, loading, creating, error, load, create, select } = useApp()
+  const {
+    workspaces,
+    currentWorkspace,
+    sessions,
+    currentId,
+    loading,
+    creating,
+    error,
+    load,
+    openWorkspace,
+    create,
+    select,
+  } = useApp()
   const current = sessions.find((s) => s.id === currentId) ?? null
+  const workspace = workspaces.find((w) => w.path === currentWorkspace) ?? null
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [draftPath, setDraftPath] = useState('')
 
   useEffect(() => {
     void load()
   }, [load])
 
+  async function submitWorkspace(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault()
+    if (!draftPath.trim()) return
+    try {
+      await openWorkspace(draftPath.trim())
+      setPickerOpen(false)
+      setDraftPath('')
+    } catch {
+      // store 已记录错误，输入框留着让用户改
+    }
+  }
+
   return (
     <div className="flex h-screen bg-white text-neutral-900">
-      {/* 左栏：会话列表 */}
+      {/* 左栏：工作区 + 会话列表 */}
       <aside className="flex w-[280px] shrink-0 flex-col border-r border-neutral-200">
-        <div className="flex items-center justify-between border-b border-neutral-200 px-3 py-3">
-          <span className="text-sm font-semibold tracking-tight">word-games</span>
-          <button
-            type="button"
-            onClick={() => void create()}
-            disabled={creating}
-            className="rounded-md bg-neutral-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-neutral-700 disabled:opacity-50"
-          >
-            {creating ? '新建中…' : '＋ 新建'}
-          </button>
+        <div className="border-b border-neutral-200 px-3 py-3">
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-semibold tracking-tight">word-games</span>
+            <button
+              type="button"
+              onClick={() => void create()}
+              disabled={creating || !currentWorkspace}
+              className="rounded-md bg-neutral-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {creating ? '新建中…' : '＋ 新建'}
+            </button>
+          </div>
+
+          <div className="mt-2">
+            <button
+              type="button"
+              onClick={() => setPickerOpen((v) => !v)}
+              className="flex w-full items-center gap-2 rounded-md border border-neutral-200 px-2 py-1.5 text-left text-xs hover:bg-neutral-50"
+            >
+              <span className="shrink-0 text-neutral-400">工作区</span>
+              <span className="min-w-0 flex-1 truncate text-neutral-700">
+                {workspace ? workspace.name : '未打开'}
+              </span>
+              <span className="shrink-0 text-neutral-400">▾</span>
+            </button>
+
+            {pickerOpen && (
+              <form
+                onSubmit={submitWorkspace}
+                className="mt-2 space-y-2 rounded-md border border-neutral-200 p-2"
+              >
+                <input
+                  autoFocus
+                  value={draftPath}
+                  onChange={(e) => setDraftPath(e.target.value)}
+                  placeholder="目录绝对路径，如 D:\\games\\雾港"
+                  className="w-full rounded border border-neutral-200 px-2 py-1.5 text-xs outline-none focus:border-neutral-400"
+                />
+                <div className="flex items-center gap-2">
+                  <button
+                    type="submit"
+                    className="rounded bg-neutral-900 px-2 py-1 text-xs text-white hover:bg-neutral-700"
+                  >
+                    打开
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPickerOpen(false)}
+                    className="rounded px-2 py-1 text-xs text-neutral-500 hover:bg-neutral-100"
+                  >
+                    取消
+                  </button>
+                </div>
+
+                {workspaces.length > 0 && (
+                  <div className="space-y-1 border-t border-neutral-100 pt-2">
+                    <p className="text-[11px] text-neutral-400">最近打开</p>
+                    {workspaces.map((w) => (
+                      <button
+                        key={w.path}
+                        type="button"
+                        title={w.path}
+                        onClick={() => {
+                          setDraftPath(w.path)
+                          void openWorkspace(w.path)
+                            .then(() => setPickerOpen(false))
+                            .catch(() => {})
+                        }}
+                        className="block w-full truncate rounded px-1.5 py-1 text-left text-xs text-neutral-600 hover:bg-neutral-50"
+                      >
+                        📁 {w.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </form>
+            )}
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto p-2">
           {loading && <p className="px-2 py-3 text-xs text-neutral-400">载入中…</p>}
-          {!loading && sessions.length === 0 && (
-            <p className="px-2 py-3 text-xs text-neutral-400">还没有会话，点右上角新建一局。</p>
+          {!loading && !currentWorkspace && (
+            <p className="px-2 py-3 text-xs text-neutral-400">先打开一个工作区，再新建一局。</p>
+          )}
+          {!loading && currentWorkspace && sessions.length === 0 && (
+            <p className="px-2 py-3 text-xs text-neutral-400">这个工作区还没有会话，点右上角新建一局。</p>
           )}
           <ul className="space-y-1">
             {sessions.map((s) => {
@@ -75,22 +173,34 @@ export default function App() {
           <div className="min-w-0">
             <h1 className="truncate text-sm font-semibold">{current ? current.title : '未选择会话'}</h1>
             <p className="mt-0.5 text-xs text-neutral-500">
-              {current ? `回合 ${current.turn} · ${current.model}` : '从左栏选一局，或新建'}
+              {current
+                ? `回合 ${current.turn} · ${current.model}`
+                : currentWorkspace
+                  ? '从左侧选一局，或新建'
+                  : '先打开工作区'}
             </p>
           </div>
         </header>
 
         <div className="flex-1 overflow-y-auto px-5 py-6">
-          {!current && (
+          {!currentWorkspace && (
             <div className="mx-auto mt-16 max-w-md text-center text-sm text-neutral-400">
-              还没有选中会话。新建一局后，叙事会出现在这里。
+              还没有工作区。工作区是磁盘上的一个目录，像 DSH 一样先打开它，再在里面新建会话。
+            </div>
+          )}
+          {currentWorkspace && !current && (
+            <div className="mx-auto mt-16 max-w-md text-center text-sm text-neutral-400">
+              这个工作区还没有会话。点左上角「＋ 新建」开一局。
             </div>
           )}
           {current && (
             <div className="mx-auto max-w-2xl rounded-lg border border-dashed border-neutral-300 p-6 text-sm text-neutral-500">
               <p className="font-medium text-neutral-700">会话已就绪</p>
               <p className="mt-2">
-                会话文件夹已写在 <code className="rounded bg-neutral-100 px-1 py-0.5 text-xs">sessions/{current.id}/</code>。
+                会话文件夹：{' '}
+                <code className="rounded bg-neutral-100 px-1 py-0.5 text-xs">
+                  {currentWorkspace}/{current.id}/
+                </code>
               </p>
               <p className="mt-1">下一张票接入叙事引擎：玩家输入 → 真模型 → 流式叙事 + 工具卡 + 选项。</p>
             </div>
