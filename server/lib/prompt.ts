@@ -8,6 +8,7 @@ export const CONTRACT = `你是互动小说（Interactive Fiction）的叙事引
 判定一律用 roll_check：d6 + 属性 对比 dc，以工具返回的结果为准，不要自己编数值。
 移动一律用 move_to，只能走当前场景的出口。
 触发结局用 trigger_ending；结局触发后不再 end_turn。
+需要回忆更早的剧情细节时，用 recall 工具：按关键词搜记忆索引，或按回合范围取回原文。
 叙事用第二人称、冷峻克制；不剧透未触发的结局，不替玩家描述其内心决定。`
 
 export interface ChatToolCall {
@@ -25,7 +26,8 @@ export interface PromptInput {
   agentMd: string
   world: World
   state: GameState
-  summary: string
+  /** 更早剧情的摘要 + 索引（memoryBlock 的结果）。 */
+  memory: string
   history: { role: string; text: string }[]
   playerInput: string
 }
@@ -68,7 +70,7 @@ export function buildMessages(input: PromptInput): ChatMessage[] {
     .join('\n\n')
 
   const user = [
-    input.summary ? `【更早剧情摘要】\n${input.summary}` : '',
+    input.memory ? `【更早剧情（摘要 + 索引）】\n${input.memory}` : '',
     historyBlock(input.history),
     `【玩家本回合行动】\n${input.playerInput}`,
   ]

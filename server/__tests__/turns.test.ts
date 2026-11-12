@@ -214,7 +214,7 @@ describe('POST /turns，假 LLM 驱动', () => {
       world: loadWorld(dir),
       state: readState(dir),
       agentMd: '',
-      summary: '',
+      memories: [],
       history: [],
       playerInput: '推门',
       signal: controller.signal,
@@ -243,7 +243,7 @@ describe('POST /turns，假 LLM 驱动', () => {
       world: loadWorld(dir),
       state: readState(dir),
       agentMd: '',
-      summary: '',
+      memories: [],
       history: [],
       playerInput: '推门',
       emit: () => {},
@@ -316,5 +316,63 @@ describe('POST /turns，假 LLM 驱动', () => {
     await (await postTurn('二')).text()
     expect(systemText).toContain('【第二版】')
     expect(systemText).not.toContain('【第一版】')
+  })
+
+  it('已记忆的回合压成摘要 + 索引，不再进最近剧情', async () => {
+    const dir = sessionDir(root, sessionId)
+    const records: MessageRecord[] = []
+    for (let turn = 0; turn < 9; turn++) {
+      records.push({
+        role: 'player',
+        turn,
+        at: `2026-11-12T00:00:0${turn}.000Z`,
+        text: `第 ${turn + 1} 回合的玩家行动`,
+      })
+      records.push({
+        role: 'engine',
+        turn,
+        at: `2026-11-12T00:00:1${turn}.000Z`,
+        kind: 'text',
+        text: `第 ${turn + 1} 回合的叙事`,
+      })
+    }
+    writeFileSync(
+      path.join(dir, 'messages.jsonl'),
+      records.map((record) => JSON.stringify(record)).join('\n') + '\n',
+      'utf8',
+    )
+    writeFileSync(
+      path.join(dir, 'memory.jsonl'),
+      JSON.stringify({
+        id: 'm0-3',
+        turns: [0, 3],
+        summary: '玩家在门厅翻找。',
+        keywords: ['门厅'],
+        entities: [],
+        createdAt: '',
+      }) + '\n',
+      'utf8',
+    )
+
+    let capturedUser = ''
+    setLlmRunner(async function* (params) {
+      capturedUser = params.messages.find((message) => message.role === 'user')?.content ?? ''
+      yield { type: 'delta' as const, text: '好。' }
+      yield {
+        type: 'tool_call' as const,
+        toolCall: {
+          id: 'call_end',
+          name: 'end_turn',
+          args: JSON.stringify({ narrative: '', options: ['走', '停'] }),
+        },
+      }
+      yield { type: 'done' as const, finishReason: 'stop' }
+    })
+
+    await (await postTurn('继续')).text()
+    expect(capturedUser).toContain('【更早剧情（摘要 + 索引）】')
+    expect(capturedUser).toContain('回合 1–4：玩家在门厅翻找。')
+    expect(capturedUser).not.toContain('第 1 回合的玩家行动')
+    expect(capturedUser).toContain('第 9 回合的玩家行动')
   })
 })

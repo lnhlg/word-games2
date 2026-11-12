@@ -35,7 +35,7 @@ describe('buildMessages 组装顺序', () => {
       agentMd: '【AGENT】按门规行事。',
       world,
       state,
-      summary: '',
+      memory: '',
       history: [],
       playerInput: '推门',
     })
@@ -54,7 +54,7 @@ describe('buildMessages 组装顺序', () => {
       agentMd: '',
       world,
       state,
-      summary: '你曾在码头见过一只黑猫。',
+      memory: '你曾在码头见过一只黑猫。',
       history: [
         { role: 'player', text: '我走进门厅' },
         { role: 'engine', text: '门轴响了。' },
@@ -62,8 +62,8 @@ describe('buildMessages 组装顺序', () => {
       playerInput: '我推开书房的门',
     })
     const user = messages[1].content ?? ''
-    expect(user.indexOf('【更早剧情摘要】')).toBe(0)
-    expect(user.indexOf('最近剧情')).toBeGreaterThan(user.indexOf('【更早剧情摘要】'))
+    expect(user.indexOf('【更早剧情（摘要 + 索引）】')).toBe(0)
+    expect(user.indexOf('最近剧情')).toBeGreaterThan(user.indexOf('【更早剧情（摘要 + 索引）】'))
     expect(user.lastIndexOf('【玩家本回合行动】')).toBeGreaterThan(user.indexOf('最近剧情'))
   })
 
@@ -72,7 +72,7 @@ describe('buildMessages 组装顺序', () => {
       agentMd: '',
       world,
       state,
-      summary: '',
+      memory: '',
       history: [],
       playerInput: '看',
     })

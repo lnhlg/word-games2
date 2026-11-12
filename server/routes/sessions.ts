@@ -19,6 +19,7 @@ import {
   type SessionMeta,
 } from '../lib/session-fs'
 import { resolveAgentMd } from '../lib/agent-md'
+import { readMemories, rememberedUntil } from '../lib/memory'
 import { runTurn } from '../lib/turn'
 import { loadWorld } from '../lib/world'
 
@@ -149,7 +150,12 @@ app.post('/:id/turns', async (c) => {
   const meta = readMeta(dir)
   const state = readState(dir)
   const world = loadWorld(dir)
-  const history = extractHistory(visibleMessages(readMessages(dir), meta))
+  const memories = readMemories(dir)
+  // 已记忆的回合不再进最近剧情（它们已压成摘要 + 索引）。
+  const rememberedFrom = rememberedUntil(memories)
+  const history = extractHistory(
+    visibleMessages(readMessages(dir), meta).filter((message) => 'turn' in message && message.turn >= rememberedFrom),
+  )
 
   const agentMd = resolveAgentMd(dir, meta.model)
 
@@ -165,7 +171,7 @@ app.post('/:id/turns', async (c) => {
         world,
         state,
         agentMd,
-        summary: '',
+        memories,
         history,
         playerInput: input,
         reusePlayer: body.retry === true,

@@ -9,6 +9,7 @@ import {
 import { buildMessages } from './prompt'
 import { executeTool } from './tools'
 import { getLlmRunner } from './llm'
+import { memoryBlock, rememberBatch, type MemoryRecord } from './memory'
 import type { World } from './world'
 
 export type TurnEvent =
@@ -27,7 +28,7 @@ export interface RunTurnArgs {
   world: World
   state: GameState
   agentMd: string
-  summary: string
+  memories: MemoryRecord[]
   history: { role: string; text: string }[]
   playerInput: string
   /** 重试时复用 messages.jsonl 里已有的玩家输入，不再追加一条。 */
@@ -69,7 +70,7 @@ export async function runTurn(args: RunTurnArgs): Promise<void> {
     agentMd: args.agentMd,
     world,
     state,
-    summary: args.summary,
+    memory: memoryBlock(args.memories),
     history: args.history,
     playerInput: args.playerInput,
   })
@@ -128,7 +129,7 @@ export async function runTurn(args: RunTurnArgs): Promise<void> {
         }
 
         await args.emit({ type: 'tool_call', id: call.id, name: call.name, args: parsed })
-        const outcome = executeTool(call.name, parsed, { world, state })
+        const outcome = executeTool(call.name, parsed, { world, state, dir, memories: args.memories })
         await args.emit({ type: 'tool_result', id: call.id, name: call.name, ok: outcome.ok, result: outcome.result })
         appendMessage(dir, {
           role: 'engine',
@@ -216,4 +217,11 @@ export async function runTurn(args: RunTurnArgs): Promise<void> {
 
   await args.emit({ type: 'state', state })
   await args.emit({ type: 'done', turn: nextMeta.turn })
+
+  // 超过最近 8 回合后，把最早的一批压成「摘要 + 索引」；失败不影响本回合。
+  try {
+    await rememberBatch(dir, args.memories, nextMeta.turn, meta.model)
+  } catch (error) {
+    console.error(`[memory] 回合 ${nextMeta.turn} 记忆失败：`, error)
+  }
 }

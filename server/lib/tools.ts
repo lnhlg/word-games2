@@ -1,4 +1,5 @@
 import type { GameState } from './session-fs'
+import { excerptTurns, searchMemories, type MemoryRecord } from './memory'
 import { sceneByRef, type World } from './world'
 
 export const TOOL_SCHEMAS = [
@@ -86,6 +87,27 @@ export const TOOL_SCHEMAS = [
   {
     type: 'function' as const,
     function: {
+      name: 'recall',
+      description: '回忆更早的剧情：按关键词搜索记忆索引，或按回合范围直接取回原文',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: '要回忆的关键词、场景或人物' },
+          turns: {
+            type: 'array',
+            items: { type: 'number' },
+            minItems: 2,
+            maxItems: 2,
+            description: '可选：直接指定回合范围 [起, 止]（0 基，闭区间）',
+          },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
       name: 'trigger_ending',
       description: '触发一个结局，会话状态转为已结束',
       parameters: {
@@ -118,6 +140,8 @@ export const TOOL_SCHEMAS = [
 export interface ToolContext {
   world: World
   state: GameState
+  dir: string
+  memories: MemoryRecord[]
 }
 
 export interface ToolOutcome {
@@ -192,6 +216,24 @@ export function executeTool(name: string, rawArgs: unknown, ctx: ToolContext): T
         .slice(0, 8)
         .join('\n')
       return { ok: true, result: { found: hits.length > 0, text: hits } }
+    }
+
+    case 'recall': {
+      const range = Array.isArray(args.turns) ? args.turns.map(Number) : null
+      if (range && range.length === 2 && Number.isFinite(range[0]) && Number.isFinite(range[1])) {
+        const turns: [number, number] = [range[0], range[1]]
+        return { ok: true, result: { turns, excerpt: excerptTurns(ctx.dir, turns) } }
+      }
+      const query = String(args.query ?? '').trim()
+      if (!query) return fail('需要 query 或 turns')
+      const hits = searchMemories(ctx.dir, ctx.memories, query)
+      if (!hits.length) {
+        return {
+          ok: true,
+          result: { found: false, query, hint: '没有命中记忆；可以换更宽泛的词，或用 turns 指定回合范围' },
+        }
+      }
+      return { ok: true, result: { found: true, query, hits } }
     }
 
     case 'trigger_ending': {

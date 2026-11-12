@@ -34,6 +34,7 @@ const TOOL_LABELS: Record<string, string> = {
   move_to: '移动',
   lookup_lore: '查阅',
   roll_check: '判定',
+  recall: '回忆',
   set_flag: '标记',
   add_item: '获得',
   remove_item: '失去',
