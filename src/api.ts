@@ -84,7 +84,7 @@ export async function getSession(workspace: string, id: string): Promise<Session
 export async function patchSession(
   workspace: string,
   id: string,
-  patch: { title?: string; status?: SessionMeta['status'] },
+  patch: { title?: string; status?: SessionMeta['status']; model?: string },
 ): Promise<SessionMeta> {
   const { session } = await request<{ session: SessionMeta }>(
     `/api/sessions/${encodeURIComponent(id)}?workspace=${encodeURIComponent(workspace)}`,
@@ -173,4 +173,26 @@ export async function streamTurn(
       index = buffer.indexOf('\n\n')
     }
   }
+}
+
+export interface SettingsView {
+  baseUrl: string
+  hasKey: boolean
+  defaultModel: string
+}
+
+export async function getSettings(): Promise<SettingsView> {
+  return request<SettingsView>('/api/settings')
+}
+
+export async function putSettings(patch: {
+  baseUrl?: string
+  apiKey?: string
+  defaultModel?: string
+}): Promise<SettingsView> {
+  return request<SettingsView>('/api/settings', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
 }

@@ -4,14 +4,17 @@ import {
   deleteSession,
   exportSession,
   getSession,
+  getSettings,
   getWorkspaces,
   listSessions,
   openWorkspace as openWorkspaceApi,
   patchSession,
   pickWorkspace,
+  putSettings,
   rollbackSession as rollbackSessionApi,
   streamTurn,
   type SessionMeta,
+  type SettingsView,
   type Workspace,
 } from './api'
 import type { GameState, MessageRecord, TurnEvent } from './types'
@@ -60,6 +63,11 @@ interface AppState {
   remove: (id: string) => Promise<void>
   exportMarkdown: (id: string) => Promise<string>
   rollback: (turn: number) => Promise<void>
+
+  settings: SettingsView | null
+  loadSettings: () => Promise<void>
+  saveSettings: (patch: { baseUrl?: string; apiKey?: string; defaultModel?: string }) => Promise<void>
+  setModel: (id: string, model: string) => Promise<void>
 }
 
 function messageOf(error: unknown): string {
@@ -364,6 +372,41 @@ export const useApp = create<AppState>((set, get) => ({
         liveTools: [],
         options: [],
         sessions: get().sessions.map((session) => (session.id === id ? result.meta : session)),
+        error: null,
+      })
+    } catch (e) {
+      set({ error: messageOf(e) })
+      throw e
+    }
+  },
+
+  settings: null,
+
+  loadSettings: async () => {
+    try {
+      set({ settings: await getSettings() })
+    } catch (e) {
+      set({ error: messageOf(e) })
+    }
+  },
+
+  saveSettings: async (patch) => {
+    try {
+      set({ settings: await putSettings(patch), error: null })
+    } catch (e) {
+      set({ error: messageOf(e) })
+      throw e
+    }
+  },
+
+  setModel: async (id, model) => {
+    const workspace = get().currentWorkspace
+    if (!workspace) return
+    try {
+      const meta = await patchSession(workspace, id, { model })
+      set({
+        sessions: get().sessions.map((session) => (session.id === id ? meta : session)),
+        meta: get().meta?.id === id ? meta : get().meta,
         error: null,
       })
     } catch (e) {

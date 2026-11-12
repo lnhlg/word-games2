@@ -40,7 +40,10 @@ export type MessageRecord =
   | { role: 'engine'; turn: number; at: string; kind: 'options'; options: string[] }
   | { role: 'system'; at: string; kind: 'error'; text: string }
 
-export const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'deepseek-chat'
+/** 默认模型：运行时读 env，设置页改完立刻生效。 */
+export function defaultModel(): string {
+  return process.env.DEFAULT_MODEL || 'deepseek-chat'
+}
 
 export const DEFAULT_WORLD = `engine:
   name: "叙事引擎"
@@ -107,7 +110,7 @@ export function createSession(root: string): SessionMeta {
   const meta: SessionMeta = {
     id,
     title: '未命名的一局',
-    model: DEFAULT_MODEL,
+    model: defaultModel(),
     createdAt: now,
     updatedAt: now,
     turn: 0,

@@ -57,19 +57,20 @@ app.patch('/:id', async (c) => {
   const dir = sessionDir(workspace, c.req.param('id'))
   if (!existsSync(path.join(dir, 'session.json'))) return c.json({ error: 'session not found' }, 404)
 
-  let body: { title?: unknown; status?: unknown } = {}
+  let body: { title?: unknown; status?: unknown; model?: unknown } = {}
   try {
-    body = (await c.req.json()) as { title?: unknown; status?: unknown }
+    body = (await c.req.json()) as { title?: unknown; status?: unknown; model?: unknown }
   } catch {
     body = {}
   }
 
-  const patch: { title?: string; status?: SessionMeta['status'] } = {}
+  const patch: { title?: string; status?: SessionMeta['status']; model?: string } = {}
   if (typeof body.title === 'string') patch.title = body.title
   if (body.status === 'active' || body.status === 'ended' || body.status === 'archived') {
     patch.status = body.status
   }
-  if (patch.title === undefined && patch.status === undefined) {
+  if (typeof body.model === 'string' && body.model.trim()) patch.model = body.model.trim()
+  if (patch.title === undefined && patch.status === undefined && patch.model === undefined) {
     return c.json({ error: 'nothing to patch' }, 400)
   }
   return c.json({ session: patchMeta(dir, patch) })

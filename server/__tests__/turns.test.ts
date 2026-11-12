@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -252,5 +252,39 @@ describe('POST /turns，假 LLM 驱动', () => {
     const records = readMessages(dir)
     expect(records.some((r) => r.role === 'system' && r.text.includes('模型炸了'))).toBe(true)
     expect(readMeta(dir).turn).toBe(0)
+  })
+
+  it('改模型后下一回合的 prompt 用对应的 <model>.md', async () => {
+    const dir = sessionDir(root, sessionId)
+    writeFileSync(path.join(dir, 'fake-model.md'), '【专用设定】只按这个设定叙事。', 'utf8')
+
+    const patched = await app.request(`/api/sessions/${sessionId}${q(root)}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'fake-model' }),
+    })
+    expect(patched.status).toBe(200)
+
+    let systemText = ''
+    setLlmRunner(async function* (params) {
+      systemText = params.messages
+        .filter((message) => message.role === 'system')
+        .map((message) => message.content)
+        .join('\n')
+      yield { type: 'delta' as const, text: '嗯。' }
+      yield {
+        type: 'tool_call' as const,
+        toolCall: {
+          id: 'call_end',
+          name: 'end_turn',
+          args: JSON.stringify({ narrative: '', options: ['继续', '后退'] }),
+        },
+      }
+      yield { type: 'done' as const, finishReason: 'stop' }
+    })
+
+    const res = await postTurn('往前走')
+    await res.text()
+    expect(systemText).toContain('【专用设定】')
   })
 })

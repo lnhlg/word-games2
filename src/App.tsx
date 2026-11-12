@@ -162,6 +162,10 @@ export default function App() {
     retryInput,
     retry,
     dismissError,
+    settings,
+    loadSettings,
+    saveSettings,
+    setModel,
   } = useApp()
 
   const current = sessions.find((session) => session.id === currentId) ?? null
@@ -171,10 +175,14 @@ export default function App() {
   const [menuFor, setMenuFor] = useState<string | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editingTitle, setEditingTitle] = useState('')
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [form, setForm] = useState({ baseUrl: '', apiKey: '', defaultModel: '' })
+  const [modelDraft, setModelDraft] = useState('')
 
   useEffect(() => {
     void load()
-  }, [load])
+    void loadSettings()
+  }, [load, loadSettings])
 
   const items = useMemo(() => toDisplay(messages), [messages])
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -257,6 +265,33 @@ export default function App() {
     if (!window.confirm(`回到回合 ${target + 1} 结束时的状态？之后的回合会从消息流收起。`)) return
     try {
       await rollback(target)
+    } catch {
+      // 错误已进 store 的 error
+    }
+  }
+
+  function openSettings() {
+    setForm({
+      baseUrl: settings?.baseUrl ?? 'https://api.deepseek.com/v1',
+      apiKey: '',
+      defaultModel: settings?.defaultModel ?? 'deepseek-chat',
+    })
+    setModelDraft(current?.model ?? '')
+    setSettingsOpen(true)
+  }
+
+  async function saveAll() {
+    try {
+      await saveSettings({
+        baseUrl: form.baseUrl,
+        apiKey: form.apiKey.trim() || undefined,
+        defaultModel: form.defaultModel,
+      })
+      const model = modelDraft.trim()
+      if (current && model && model !== current.model) {
+        await setModel(current.id, model)
+      }
+      setSettingsOpen(false)
     } catch {
       // 错误已进 store 的 error
     }
@@ -456,8 +491,14 @@ export default function App() {
           </ul>
         </div>
 
-        <div className="border-t border-neutral-200 px-3 py-2 text-xs text-neutral-400">
-          设置 · 模型切换（待接入）
+        <div className="border-t border-neutral-200 p-2">
+          <button
+            type="button"
+            onClick={openSettings}
+            className="w-full rounded-md px-2 py-1.5 text-left text-xs text-neutral-500 hover:bg-neutral-50 hover:text-neutral-700"
+          >
+            设置 · 模型切换
+          </button>
         </div>
       </aside>
 
@@ -686,6 +727,79 @@ export default function App() {
           )}
         </div>
       </aside>
+
+      {settingsOpen && (
+        <div
+          className="fixed inset-0 z-20 flex items-center justify-center bg-black/20 p-4"
+          onClick={() => setSettingsOpen(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-lg bg-white p-5 shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h2 className="text-sm font-semibold">设置与模型</h2>
+            <p className="mt-1 text-xs text-neutral-400">保存后写入 .env，下一次模型调用立刻生效。</p>
+
+            <label className="mt-4 block text-xs text-neutral-500">
+              Base URL
+              <input
+                value={form.baseUrl}
+                onChange={(event) => setForm({ ...form, baseUrl: event.target.value })}
+                className="mt-1 w-full rounded-md border border-neutral-300 px-2 py-1.5 text-sm text-neutral-800"
+              />
+            </label>
+            <label className="mt-3 block text-xs text-neutral-500">
+              API Key{settings?.hasKey ? '（已配置，留空不改）' : '（未配置）'}
+              <input
+                type="password"
+                value={form.apiKey}
+                onChange={(event) => setForm({ ...form, apiKey: event.target.value })}
+                placeholder={settings?.hasKey ? '••••••••' : 'sk-...'}
+                className="mt-1 w-full rounded-md border border-neutral-300 px-2 py-1.5 text-sm text-neutral-800"
+              />
+            </label>
+            <label className="mt-3 block text-xs text-neutral-500">
+              默认模型（新建会话用）
+              <input
+                value={form.defaultModel}
+                onChange={(event) => setForm({ ...form, defaultModel: event.target.value })}
+                className="mt-1 w-full rounded-md border border-neutral-300 px-2 py-1.5 text-sm text-neutral-800"
+              />
+            </label>
+
+            {current && (
+              <label className="mt-3 block text-xs text-neutral-500">
+                本局模型（下回合生效）
+                <input
+                  value={modelDraft}
+                  onChange={(event) => setModelDraft(event.target.value)}
+                  className="mt-1 w-full rounded-md border border-neutral-300 px-2 py-1.5 text-sm text-neutral-800"
+                />
+                <span className="mt-1 block text-[11px] text-neutral-400">
+                  若会话文件夹里有 {modelDraft || '模型名'}.md，会优先于 AGENT.md
+                </span>
+              </label>
+            )}
+
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setSettingsOpen(false)}
+                className="rounded-md border border-neutral-300 px-3 py-1.5 text-xs text-neutral-600 hover:bg-neutral-50"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void saveAll()}
+                className="rounded-md bg-neutral-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-neutral-700"
+              >
+                保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {error && (
         <div className="fixed bottom-4 left-1/2 max-w-md -translate-x-1/2 rounded-md bg-red-600 px-3 py-2 text-xs text-white shadow-lg">

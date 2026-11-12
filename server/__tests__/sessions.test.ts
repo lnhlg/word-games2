@@ -79,6 +79,26 @@ describe('workspaces + sessions API', () => {
     expect(body.sessions.find((s) => s.id === session.id)?.title).toBe('雾港新篇')
   })
 
+  it('PATCH 改模型后列表与详情都更新', async () => {
+    const created = await app.request(`/api/sessions${q(root)}`, { method: 'POST' })
+    const { session } = (await created.json()) as { session: { id: string; model: string } }
+    const original = session.model
+
+    const patched = await app.request(`/api/sessions/${session.id}${q(root)}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'another-model' }),
+    })
+    expect(patched.status).toBe(200)
+    const patchedBody = (await patched.json()) as { session: { model: string } }
+    expect(patchedBody.session.model).toBe('another-model')
+
+    const detail = await app.request(`/api/sessions/${session.id}${q(root)}`)
+    const detailBody = (await detail.json()) as { meta: { model: string } }
+    expect(detailBody.meta.model).toBe('another-model')
+    expect(original).not.toBe('another-model')
+  })
+
   it('DELETE 移除整个会话文件夹', async () => {
     const created = await app.request(`/api/sessions${q(root)}`, { method: 'POST' })
     const { session } = (await created.json()) as { session: { id: string } }
