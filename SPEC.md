@@ -16,7 +16,7 @@
 
 一个本地运行的 Web 应用（前端 React + 后端 Hono），界面形态借用 DSH：三栏布局、消息流、可折叠的工具调用卡片。
 
-每局游戏是一个**自包含的文件夹**（`sessions/<id>/`），里面是纯文本与 JSON：`session.json`、`AGENT.md`、`<model>.md`、`world.yaml`、`state.json`、`messages.jsonl`、`snapshots/`。会话文件夹就是存档，可以拷走、可以 git、可以手改。
+应用以**工作区**组织：工作区是磁盘上的一个目录，先打开它，再在里面开一局。每局游戏是一个**自包含的文件夹**（`<工作区>/<id>/`），里面是纯文本与 JSON：`session.json`、`AGENT.md`、`<model>.md`、`world.yaml`、`state.json`、`messages.jsonl`、`snapshots/`。会话文件夹就是存档，可以拷走、可以 git、可以手改。
 
 叙事引擎由真实 LLM 驱动（OpenAI 兼容协议），通过一组工具调用维护世界状态；每回合必须调用 `end_turn` 收尾并给出 2–4 个建议行动。界面与磁盘状态双向可视：右栏就是 `state.json`，工具卡片就是每回合的工具调用记录。
 
@@ -52,7 +52,7 @@
 28. 作为玩家，我想在触发结局时被明确告知，并看到结局文本，以便知道这一局结束了。
 29. 作为玩家，我想让引擎记住更早的剧情（通过滚动摘要），以便长局不丢前情。
 30. 作为玩家，我想看到已结束的会话在列表里被标记，以便区分进行中与已完结。
-31. 作为维护者，我想整个 `sessions/` 目录是纯文本且可 git，以便版本化管理我的所有存档。
+31. 作为维护者，我想整个工作区目录是纯文本且可 git，以便版本化管理我的所有存档。
 32. 作为维护者，我想每个会话文件夹自包含（拷贝即迁移），以便不依赖中心数据库。
 33. 作为维护者，我想每回合在 `snapshots/` 留一份状态快照，以便回滚有据可依。
 34. 作为维护者，我想代码强制的引擎契约与用户可编辑的 `AGENT.md` 严格分离，以便改叙事不用重启代码。
@@ -63,24 +63,27 @@
 ### 技术栈
 
 - 前端：React 19 + Vite + TypeScript + Tailwind CSS + Zustand。
-- 后端：Hono（跑在本地 Node），负责读写 `sessions/`、调用 LLM、向浏览器推 SSE。
+- 后端：Hono（跑在本地 Node），负责读写工作区目录、调用 LLM、向浏览器推 SSE。
 - LLM：OpenAI 兼容协议（`/chat/completions` + tool calling + stream），支持任意兼容端点。
 - 传输：回合请求用 SSE；其余用普通 JSON REST。
 
-### 会话文件夹结构
+### 工作区与会话文件夹结构
+
+工作区 = 磁盘上的一个目录；会话 = 工作区里含 `session.json` 的子目录。工作区注册表（最近打开、当前）存在应用数据目录的 `workspaces.json`，不写进工作区。
 
 ```
-sessions/<sessionId>/
-  session.json       # 元数据：id/title/model/createdAt/updatedAt/turn/status
-  AGENT.md           # 用户自由编写，不解析结构
-  <model>.md         # 可选，按模型名，优先于 AGENT.md
-  world.yaml         # 世界设定 + engine 身份段 + 场景/结局骨架
-  state.json         # 当前可量化状态
-  messages.jsonl     # 追加写，一行一条，永不改写历史
-  snapshots/         # <turn>.json，每回合一份
+<workspace>/
+  <sessionId>/
+    session.json       # 元数据：id/title/model/createdAt/updatedAt/turn/status
+    AGENT.md           # 用户自由编写，不解析结构
+    <model>.md         # 可选，按模型名，优先于 AGENT.md
+    world.yaml         # 世界设定 + engine 身份段 + 场景/结局骨架
+    state.json         # 当前可量化状态
+    messages.jsonl     # 追加写，一行一条，永不改写历史
+    snapshots/         # <turn>.json，每回合一份
 ```
 
-`sessions/` 位于应用数据目录，不放在仓库源码树内；路径可通过环境变量覆盖。
+`session.json` 与 `messages.jsonl` 是识别会话的唯一依据；工作区里其他目录/文件不受影响。
 
 ### `session.json` 形状
 
@@ -189,10 +192,15 @@ endings:
 
 ### HTTP API 契约
 
+所有 `/api/sessions*` 都带 `?workspace=<工作区绝对路径>`，指向会话所属工作区。
+
 | 方法 | 路径 | 语义 |
 | --- | --- | --- |
-| GET | `/api/sessions` | 列会话（不含消息正文） |
-| POST | `/api/sessions` | 新建：建文件夹、写 world/state 初值、请求开场 |
+| GET | `/api/workspaces` | 读工作区注册表（最近打开 + 当前） |
+| POST | `/api/workspaces` | 打开一个已存在的目录并设为当前 |
+| DELETE | `/api/workspaces?path=` | 从最近列表移除 |
+| GET | `/api/sessions?workspace=` | 列该工作区下的会话（不含消息正文） |
+| POST | `/api/sessions?workspace=` | 新建：在工作区下建文件夹、写 world/state 初值、请求开场 |
 | GET | `/api/sessions/:id` | 读会话 + 全量消息 |
 | PATCH | `/api/sessions/:id` | 改标题 / 模型 |
 | DELETE | `/api/sessions/:id` | 删除会话文件夹 |
