@@ -159,6 +159,9 @@ export default function App() {
     remove,
     exportMarkdown,
     rollback,
+    retryInput,
+    retry,
+    dismissError,
   } = useApp()
 
   const current = sessions.find((session) => session.id === currentId) ?? null
@@ -566,6 +569,34 @@ export default function App() {
                   {option}
                 </button>
               ))}
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <div className="border-t border-red-200 bg-red-50">
+            <div className="mx-auto flex max-w-2xl items-center gap-3 px-5 py-2 text-xs text-red-700">
+              <span className="min-w-0 flex-1 truncate" title={error}>
+                {error}
+              </span>
+              {retryInput && (
+                <button
+                  type="button"
+                  onClick={() => void retry()}
+                  disabled={streaming}
+                  className="shrink-0 rounded border border-red-300 bg-white px-2 py-1 font-medium hover:bg-red-100 disabled:opacity-40"
+                >
+                  重试
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={dismissError}
+                title="关闭"
+                className="shrink-0 rounded px-1.5 py-1 text-red-500 hover:bg-red-100"
+              >
+                ×
+              </button>
             </div>
           </div>
         )}

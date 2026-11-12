@@ -136,11 +136,12 @@ export async function streamTurn(
   input: string,
   onEvent: (event: TurnEvent) => void,
   signal: AbortSignal,
+  options?: { retry?: boolean },
 ): Promise<void> {
   const res = await fetch(`/api/sessions/${encodeURIComponent(id)}/turns?workspace=${encodeURIComponent(workspace)}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ input }),
+    body: JSON.stringify({ input, retry: options?.retry === true }),
     signal,
   })
 

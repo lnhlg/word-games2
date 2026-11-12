@@ -4,7 +4,16 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import app from '../app'
 import { setLlmRunner } from '../lib/llm'
-import type { GameState, MessageRecord } from '../lib/session-fs'
+import {
+  readMessages,
+  readMeta,
+  readState,
+  sessionDir,
+  type GameState,
+  type MessageRecord,
+} from '../lib/session-fs'
+import { loadWorld } from '../lib/world'
+import { runTurn } from '../lib/turn'
 
 let root: string
 let sessionId: string
@@ -187,5 +196,61 @@ describe('POST /turns，假 LLM 驱动', () => {
       body: JSON.stringify({ turn: 9 }),
     })
     expect(res.status).toBe(404)
+  })
+
+  it('中断：已生成的半截叙事落盘，回合数不前进，留下中断标记', async () => {
+    const dir = sessionDir(root, sessionId)
+    setLlmRunner(async function* () {
+      yield { type: 'delta' as const, text: '门轴发出一声干涩' }
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      yield { type: 'delta' as const, text: '的呻吟。' }
+      yield { type: 'done' as const, finishReason: 'stop' }
+    })
+
+    const controller = new AbortController()
+    const running = runTurn({
+      dir,
+      meta: readMeta(dir),
+      world: loadWorld(dir),
+      state: readState(dir),
+      agentMd: '',
+      summary: '',
+      history: [],
+      playerInput: '推门',
+      signal: controller.signal,
+      emit: () => {},
+    })
+    setTimeout(() => controller.abort(), 10)
+    await running
+
+    const records = readMessages(dir)
+    expect(records.some((r) => r.role === 'engine' && r.kind === 'text' && r.text.includes('门轴发出一声干涩'))).toBe(true)
+    expect(records.some((r) => r.role === 'engine' && r.kind === 'text' && r.text.includes('的呻吟'))).toBe(false)
+    expect(records.some((r) => r.role === 'system' && r.text.includes('已中断'))).toBe(true)
+    expect(readMeta(dir).turn).toBe(0)
+    expect(readState(dir).turn).toBe(0)
+  })
+
+  it('模型失败：写 system/error 条目，回合数不前进', async () => {
+    const dir = sessionDir(root, sessionId)
+    setLlmRunner(async function* () {
+      throw new Error('模型炸了')
+    })
+
+    await runTurn({
+      dir,
+      meta: readMeta(dir),
+      world: loadWorld(dir),
+      state: readState(dir),
+      agentMd: '',
+      summary: '',
+      history: [],
+      playerInput: '推门',
+      emit: () => {},
+    })
+
+    const records = readMessages(dir)
+    expect(records.some((r) => r.role === 'system' && r.text.includes('模型炸了'))).toBe(true)
+    expect(readMeta(dir).turn).toBe(0)
   })
 })

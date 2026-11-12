@@ -32,6 +32,7 @@ interface AppState {
   loading: boolean
   creating: boolean
   error: string | null
+  retryInput: string | null
 
   meta: SessionMeta | null
   messages: MessageRecord[]
@@ -50,8 +51,10 @@ interface AppState {
   create: () => Promise<void>
   select: (id: string | null) => void
   loadSession: (id: string) => Promise<void>
-  send: (input: string) => Promise<void>
+  send: (input: string, options?: { retry?: boolean }) => Promise<void>
   cancel: () => void
+  retry: () => Promise<void>
+  dismissError: () => void
   rename: (id: string, title: string) => Promise<void>
   setStatus: (id: string, status: SessionMeta['status']) => Promise<void>
   remove: (id: string) => Promise<void>
@@ -71,6 +74,7 @@ export const useApp = create<AppState>((set, get) => ({
   loading: false,
   creating: false,
   error: null,
+  retryInput: null,
 
   meta: null,
   messages: [],
@@ -187,13 +191,15 @@ export const useApp = create<AppState>((set, get) => ({
     }
   },
 
-  send: async (input) => {
+  send: async (input, options) => {
     const workspace = get().currentWorkspace
     const id = get().currentId
     if (!workspace || !id || get().streaming || !input.trim()) return
 
     const abort = new AbortController()
     const meta = get().meta
+    const last = get().messages[get().messages.length - 1]
+    const alreadyShown = options?.retry === true && last?.role === 'player' && last.text === input
     set({
       streaming: true,
       streamText: '',
@@ -201,10 +207,13 @@ export const useApp = create<AppState>((set, get) => ({
       options: [],
       abort,
       error: null,
-      messages: [
-        ...get().messages,
-        { role: 'player', turn: meta?.turn ?? 0, at: new Date().toISOString(), text: input },
-      ],
+      retryInput: null,
+      messages: alreadyShown
+        ? get().messages
+        : [
+            ...get().messages,
+            { role: 'player', turn: meta?.turn ?? 0, at: new Date().toISOString(), text: input },
+          ],
     })
 
     const apply = (event: TurnEvent) => {
@@ -233,7 +242,7 @@ export const useApp = create<AppState>((set, get) => ({
           set({ gameState: event.state })
           break
         case 'error':
-          set({ error: event.message })
+          set({ error: event.message, retryInput: input })
           break
         default:
           break
@@ -241,9 +250,9 @@ export const useApp = create<AppState>((set, get) => ({
     }
 
     try {
-      await streamTurn(workspace, id, input, apply, abort.signal)
+      await streamTurn(workspace, id, input, apply, abort.signal, options)
     } catch (e) {
-      if (!abort.signal.aborted) set({ error: messageOf(e) })
+      if (!abort.signal.aborted) set({ error: messageOf(e), retryInput: input })
     } finally {
       set({ streaming: false, abort: null })
       await get().loadSession(id)
@@ -253,9 +262,36 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   cancel: () => {
+    const id = get().currentId
     get().abort?.abort()
-    set({ streaming: false, abort: null })
+    set({ streaming: false, abort: null, retryInput: null })
+    if (!id) return
+    // 服务端要等 abort 传过去才落盘中断标记；fetch 断开比它早，所以要轮询到看见标记为止。
+    let tries = 0
+    const tick = async () => {
+      tries += 1
+      await get().loadSession(id)
+      const last = get().messages[get().messages.length - 1]
+      const interrupted = last?.role === 'system' && last.text.includes('已中断')
+      if (!interrupted && tries < 6) {
+        setTimeout(() => void tick(), 400)
+        return
+      }
+      const workspace = get().currentWorkspace
+      if (workspace) set({ sessions: await listSessions(workspace) })
+    }
+    setTimeout(() => void tick(), 300)
   },
+
+  /** 模型失败后，用同一句输入重发（服务端不重复写玩家消息）。 */
+  retry: async () => {
+    const input = get().retryInput
+    if (!input) return
+    set({ retryInput: null })
+    await get().send(input, { retry: true })
+  },
+
+  dismissError: () => set({ error: null, retryInput: null }),
 
   rename: async (id, title) => {
     const workspace = get().currentWorkspace

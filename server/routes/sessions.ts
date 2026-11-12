@@ -135,9 +135,9 @@ app.post('/:id/turns', async (c) => {
     return c.json({ error: 'session not found' }, 404)
   }
 
-  let body: { input?: string } = {}
+  let body: { input?: string; retry?: boolean } = {}
   try {
-    body = (await c.req.json()) as { input?: string }
+    body = (await c.req.json()) as { input?: string; retry?: boolean }
   } catch {
     body = {}
   }
@@ -172,6 +172,7 @@ app.post('/:id/turns', async (c) => {
         summary: '',
         history,
         playerInput: input,
+        reusePlayer: body.retry === true,
         signal: abort.signal,
         emit: (event) => stream.writeSSE({ data: JSON.stringify(event) }),
       })
