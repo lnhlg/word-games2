@@ -138,4 +138,54 @@ describe('POST /turns，假 LLM 驱动', () => {
     const moveCall = records.find((r) => r.role === 'engine' && r.kind === 'tool_call' && r.name === 'move_to')
     expect(moveCall).toMatchObject({ args: { scene: 'study' } })
   })
+
+  it('rollback 恢复到快照、消息流截断，messages.jsonl 不回写', async () => {
+    setLlmRunner(
+      fakeLlm([
+        { text: '第一回合的叙事。', tools: [{ name: 'end_turn', args: { narrative: '', options: ['甲', '乙'] } }] },
+        { text: '第二回合的叙事。', tools: [{ name: 'end_turn', args: { narrative: '', options: ['丙', '丁'] } }] },
+      ]),
+    )
+
+    await (await postTurn('第一句')).text()
+    await (await postTurn('第二句')).text()
+
+    const dir = path.join(root, sessionId)
+    const file = path.join(dir, 'messages.jsonl')
+    const before = readFileSync(file, 'utf8').trim().split('\n')
+    expect(before.some((line) => line.includes('第二句'))).toBe(true)
+
+    const snapshot = JSON.parse(readFileSync(path.join(dir, 'snapshots', '0.json'), 'utf8')) as GameState
+    expect(snapshot.turn).toBe(0)
+
+    const res = await app.request(`/api/sessions/${sessionId}/rollback${q(root)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ turn: 0 }),
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { meta: { turn: number }; state: GameState; messages: MessageRecord[] }
+
+    expect(body.meta.turn).toBe(1)
+    expect(body.state.turn).toBe(1)
+    expect(body.state.location).toBe(snapshot.location)
+    expect(body.messages.some((m) => m.role === 'player' && m.text === '第二句')).toBe(false)
+    expect(body.messages.some((m) => m.role === 'engine' && m.kind === 'text' && m.text.includes('第二回合'))).toBe(false)
+    expect(body.messages.some((m) => m.role === 'player' && m.text === '第一句')).toBe(true)
+
+    const after = readFileSync(file, 'utf8').trim().split('\n')
+    expect(after.length).toBe(before.length)
+
+    const stateOnDisk = JSON.parse(readFileSync(path.join(dir, 'state.json'), 'utf8')) as GameState
+    expect(stateOnDisk.turn).toBe(1)
+  })
+
+  it('rollback 到不存在的快照返回 404', async () => {
+    const res = await app.request(`/api/sessions/${sessionId}/rollback${q(root)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ turn: 9 }),
+    })
+    expect(res.status).toBe(404)
+  })
 })

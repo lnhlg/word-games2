@@ -158,6 +158,7 @@ export default function App() {
     setStatus,
     remove,
     exportMarkdown,
+    rollback,
   } = useApp()
 
   const current = sessions.find((session) => session.id === currentId) ?? null
@@ -244,6 +245,18 @@ export default function App() {
     setMenuFor(null)
     if (!window.confirm(`删除「${session.title}」？整个会话文件夹会被移除，无法撤销。`)) return
     await remove(session.id)
+  }
+
+  async function rollbackOne(session: SessionMeta) {
+    setMenuFor(null)
+    const target = session.turn - 2
+    if (target < 0) return
+    if (!window.confirm(`回到回合 ${target + 1} 结束时的状态？之后的回合会从消息流收起。`)) return
+    try {
+      await rollback(target)
+    } catch {
+      // 错误已进 store 的 error
+    }
   }
 
   async function handleSubmit(event: FormEvent) {
@@ -408,6 +421,15 @@ export default function App() {
                         className="block w-full px-3 py-2 text-left hover:bg-neutral-50"
                       >
                         导出 Markdown
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void rollbackOne(session)}
+                        disabled={session.turn < 2}
+                        title={session.turn < 2 ? '还没有可回滚的回合' : '把状态恢复到上一回合结束'}
+                        className="block w-full px-3 py-2 text-left hover:bg-neutral-50 disabled:cursor-not-allowed disabled:text-neutral-300"
+                      >
+                        回到上一回合
                       </button>
                       <button
                         type="button"

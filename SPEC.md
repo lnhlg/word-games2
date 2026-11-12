@@ -224,7 +224,7 @@ SSE 事件：`turn_start`、`delta`（叙事增量）、`tool_call`、`tool_resu
 - 模型调用失败：写入 `system/error` 条目，composer 上方显示重试按钮，重试重发同一输入。
 - 工具失败（参数非法/出口不存在）：写入 `tool` 条目 `ok:false`，引擎据此改写叙事，不中断回合。
 - 会话不存在 / 文件夹损坏：列表项标红，点击展示具体缺失文件。
-- 回滚：只接受已存在的 `snapshots/<turn>.json`；回滚后 `messages.jsonl` 保留，消息流以快照回合截断展示。
+- 回滚：只接受已存在的 `snapshots/<turn>.json`；回滚后 `messages.jsonl` 保留，消息流以快照回合截断展示（`session.json` 的 `discarded` 记录每次回滚的回合与时刻，读取时过滤掉被回滚分支里更晚回合、且早于该时刻的消息）。
 
 ## 测试决策
 

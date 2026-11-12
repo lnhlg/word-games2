@@ -8,6 +8,7 @@ export interface SessionMeta {
   updatedAt: string
   turn: number
   status: 'active' | 'ended' | 'archived'
+  discarded?: { turn: number; at: string }[]
 }
 
 export interface SessionDetail {
@@ -109,6 +110,23 @@ export async function exportSession(workspace: string, id: string): Promise<stri
   )
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`)
   return res.text()
+}
+
+export interface RollbackResult {
+  meta: SessionMeta
+  state: GameState
+  messages: MessageRecord[]
+}
+
+export async function rollbackSession(workspace: string, id: string, turn: number): Promise<RollbackResult> {
+  return request<RollbackResult>(
+    `/api/sessions/${encodeURIComponent(id)}/rollback?workspace=${encodeURIComponent(workspace)}`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ turn }),
+    },
+  )
 }
 
 /** 提交一次玩家输入，按 SSE 事件回调；signal 中断时 fetch 被 abort。 */

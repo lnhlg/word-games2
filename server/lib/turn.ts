@@ -76,7 +76,7 @@ export async function runTurn(args: RunTurnArgs): Promise<void> {
 
     if (text) {
       narrative += text
-      appendMessage(dir, { role: 'engine', turn, kind: 'text', text })
+      appendMessage(dir, { role: 'engine', turn, at: new Date().toISOString(), kind: 'text', text })
     }
 
     if (!calls.length) break
@@ -102,10 +102,19 @@ export async function runTurn(args: RunTurnArgs): Promise<void> {
       await emit({ type: 'tool_call', id: call.id, name: call.name, args: parsed })
       const outcome = executeTool(call.name, parsed, { world, state })
       await emit({ type: 'tool_result', id: call.id, name: call.name, ok: outcome.ok, result: outcome.result })
-      appendMessage(dir, { role: 'engine', turn, kind: 'tool_call', id: call.id, name: call.name, args: parsed })
+      appendMessage(dir, {
+        role: 'engine',
+        turn,
+        at: new Date().toISOString(),
+        kind: 'tool_call',
+        id: call.id,
+        name: call.name,
+        args: parsed,
+      })
       appendMessage(dir, {
         role: 'tool',
         turn,
+        at: new Date().toISOString(),
         callId: call.id,
         name: call.name,
         ok: outcome.ok,
@@ -127,17 +136,17 @@ export async function runTurn(args: RunTurnArgs): Promise<void> {
   if (!narrative && endingNarrative) {
     narrative = endingNarrative
     await emit({ type: 'delta', text: endingNarrative })
-    appendMessage(dir, { role: 'engine', turn, kind: 'text', text: endingNarrative })
+    appendMessage(dir, { role: 'engine', turn, at: new Date().toISOString(), kind: 'text', text: endingNarrative })
   }
 
   if (!narrative) {
     narrative = '（引擎没有给出叙事。请重试，或检查模型配置。）'
     await emit({ type: 'delta', text: narrative })
-    appendMessage(dir, { role: 'engine', turn, kind: 'text', text: narrative })
+    appendMessage(dir, { role: 'engine', turn, at: new Date().toISOString(), kind: 'text', text: narrative })
   }
 
   if (options && options.length >= 2) {
-    appendMessage(dir, { role: 'engine', turn, kind: 'options', options })
+    appendMessage(dir, { role: 'engine', turn, at: new Date().toISOString(), kind: 'options', options })
     await emit({ type: 'options', options })
   }
 

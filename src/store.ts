@@ -9,6 +9,7 @@ import {
   openWorkspace as openWorkspaceApi,
   patchSession,
   pickWorkspace,
+  rollbackSession as rollbackSessionApi,
   streamTurn,
   type SessionMeta,
   type Workspace,
@@ -55,6 +56,7 @@ interface AppState {
   setStatus: (id: string, status: SessionMeta['status']) => Promise<void>
   remove: (id: string) => Promise<void>
   exportMarkdown: (id: string) => Promise<string>
+  rollback: (turn: number) => Promise<void>
 }
 
 function messageOf(error: unknown): string {
@@ -310,5 +312,27 @@ export const useApp = create<AppState>((set, get) => ({
     const workspace = get().currentWorkspace
     if (!workspace) return Promise.reject(new Error('先打开一个工作区'))
     return exportSession(workspace, id)
+  },
+
+  rollback: async (turn) => {
+    const workspace = get().currentWorkspace
+    const id = get().currentId
+    if (!workspace || !id) return
+    try {
+      const result = await rollbackSessionApi(workspace, id, turn)
+      set({
+        meta: result.meta,
+        messages: result.messages,
+        gameState: result.state,
+        streamText: '',
+        liveTools: [],
+        options: [],
+        sessions: get().sessions.map((session) => (session.id === id ? result.meta : session)),
+        error: null,
+      })
+    } catch (e) {
+      set({ error: messageOf(e) })
+      throw e
+    }
   },
 }))

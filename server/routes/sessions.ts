@@ -12,7 +12,9 @@ import {
   readSession,
   readState,
   removeSession,
+  rollbackSession,
   sessionDir,
+  visibleMessages,
   type MessageRecord,
   type SessionMeta,
 } from '../lib/session-fs'
@@ -94,6 +96,26 @@ app.get('/:id/export', (c) => {
   return c.body(markdown)
 })
 
+app.post('/:id/rollback', async (c) => {
+  const workspace = workspaceOf(c)
+  if (!workspace) return c.json({ error: 'workspace required' }, 400)
+  const dir = sessionDir(workspace, c.req.param('id'))
+  if (!existsSync(path.join(dir, 'session.json'))) return c.json({ error: 'session not found' }, 404)
+
+  let body: { turn?: unknown } = {}
+  try {
+    body = (await c.req.json()) as { turn?: unknown }
+  } catch {
+    body = {}
+  }
+  const turn = typeof body.turn === 'number' ? body.turn : Number.NaN
+  if (!Number.isInteger(turn) || turn < 0) return c.json({ error: 'turn required' }, 400)
+
+  const result = rollbackSession(dir, turn)
+  if (!result) return c.json({ error: 'snapshot not found' }, 404)
+  return c.json(result)
+})
+
 /** 最近 8 回合的原始对白，供 prompt 组装用。 */function extractHistory(messages: MessageRecord[]): { role: string; text: string }[] {
   const out: { role: string; text: string }[] = []
   for (const m of messages) {
@@ -125,7 +147,7 @@ app.post('/:id/turns', async (c) => {
   const meta = readMeta(dir)
   const state = readState(dir)
   const world = loadWorld(dir)
-  const history = extractHistory(readMessages(dir))
+  const history = extractHistory(visibleMessages(readMessages(dir), meta))
 
   const modelFile = path.join(dir, `${meta.model}.md`)
   const agentFile = path.join(dir, 'AGENT.md')

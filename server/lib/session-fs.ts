@@ -9,6 +9,8 @@ export interface SessionMeta {
   updatedAt: string
   turn: number
   status: 'active' | 'ended' | 'archived'
+  /** 回滚记录：每次回滚记下 (回滚到的回合, 回滚时刻)；此前的分叉消息按它过滤。 */
+  discarded?: { turn: number; at: string }[]
 }
 
 export interface CheckResult {
@@ -32,11 +34,11 @@ export interface GameState {
 
 export type MessageRecord =
   | { role: 'player'; turn: number; at: string; text: string }
-  | { role: 'engine'; turn: number; kind: 'text'; text: string }
-  | { role: 'engine'; turn: number; kind: 'tool_call'; id: string; name: string; args: unknown }
-  | { role: 'tool'; turn: number; callId: string; name: string; ok: boolean; result: unknown }
-  | { role: 'engine'; turn: number; kind: 'options'; options: string[] }
-  | { role: 'system'; kind: 'error'; text: string }
+  | { role: 'engine'; turn: number; at: string; kind: 'text'; text: string }
+  | { role: 'engine'; turn: number; at: string; kind: 'tool_call'; id: string; name: string; args: unknown }
+  | { role: 'tool'; turn: number; at: string; callId: string; name: string; ok: boolean; result: unknown }
+  | { role: 'engine'; turn: number; at: string; kind: 'options'; options: string[] }
+  | { role: 'system'; at: string; kind: 'error'; text: string }
 
 export const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'deepseek-chat'
 
@@ -252,11 +254,47 @@ export function exportMarkdown(
   return lines.join('\n')
 }
 
+/** 回滚之后，被回滚分支里在回滚时刻之前产生的消息不再展示；messages.jsonl 本身不动。 */
+export function visibleMessages(messages: MessageRecord[], meta: SessionMeta): MessageRecord[] {
+  const discarded = meta.discarded ?? []
+  if (discarded.length === 0) return messages
+  return messages.filter((message) => {
+    if (!('turn' in message)) return true
+    return !discarded.some((cut) => message.turn > cut.turn && message.at <= cut.at)
+  })
+}
+
+export interface RollbackResult {
+  meta: SessionMeta
+  state: GameState
+  messages: MessageRecord[]
+}
+
+/** 把 state 恢复到 snapshots/<turn>.json；messages.jsonl 只追加不回写。 */
+export function rollbackSession(dir: string, turn: number): RollbackResult | null {
+  const file = path.join(dir, 'snapshots', `${turn}.json`)
+  if (!existsSync(file)) return null
+
+  const snapshot = JSON.parse(readFileSync(file, 'utf8')) as GameState
+  const state: GameState = { ...snapshot, turn: turn + 1 }
+  writeState(dir, state)
+
+  const meta = readMeta(dir)
+  meta.turn = turn + 1
+  meta.status = state.ending ? 'ended' : 'active'
+  meta.updatedAt = new Date().toISOString()
+  meta.discarded = [...(meta.discarded ?? []), { turn, at: meta.updatedAt }]
+  writeMeta(dir, meta)
+
+  return { meta, state, messages: visibleMessages(readMessages(dir), meta) }
+}
+
 export function readSession(
   root: string,
   id: string,
 ): { meta: SessionMeta; messages: MessageRecord[]; state: GameState } | null {
   const dir = sessionDir(root, id)
   if (!existsSync(path.join(dir, 'session.json'))) return null
-  return { meta: readMeta(dir), messages: readMessages(dir), state: readState(dir) }
+  const meta = readMeta(dir)
+  return { meta, messages: visibleMessages(readMessages(dir), meta), state: readState(dir) }
 }

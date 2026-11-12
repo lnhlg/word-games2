@@ -19,11 +19,11 @@ export interface GameState {
 
 export type MessageRecord =
   | { role: 'player'; turn: number; at: string; text: string }
-  | { role: 'engine'; turn: number; kind: 'text'; text: string }
-  | { role: 'engine'; turn: number; kind: 'tool_call'; id: string; name: string; args: unknown }
-  | { role: 'tool'; turn: number; callId: string; name: string; ok: boolean; result: unknown }
-  | { role: 'engine'; turn: number; kind: 'options'; options: string[] }
-  | { role: 'system'; kind: 'error'; text: string }
+  | { role: 'engine'; turn: number; at: string; kind: 'text'; text: string }
+  | { role: 'engine'; turn: number; at: string; kind: 'tool_call'; id: string; name: string; args: unknown }
+  | { role: 'tool'; turn: number; at: string; callId: string; name: string; ok: boolean; result: unknown }
+  | { role: 'engine'; turn: number; at: string; kind: 'options'; options: string[] }
+  | { role: 'system'; at: string; kind: 'error'; text: string }
 
 export type TurnEvent =
   | { type: 'turn_start'; turn: number }
