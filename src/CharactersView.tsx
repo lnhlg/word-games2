@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import CardEditorDialog from './CardEditorDialog'
 import ModelPicker from './ModelPicker'
 import { useApp } from './store'
 import type { CharacterCard } from './types'
@@ -69,6 +70,7 @@ function CardPreview({ card }: { card: CharacterCard }) {
 export default function CharactersView() {
   const {
     currentWorkspace,
+    cards,
     cardsLoading,
     selectedCard,
     selectedCardId,
@@ -79,16 +81,23 @@ export default function CharactersView() {
     studioSend,
     studioCancel,
     studioReset,
+    studioEditId,
+    studioStartEdit,
+    studioStopEdit,
     settings,
     studioSelection,
     setStudioSelection,
     importCard,
+    editCard,
     deleteCard,
   } = useApp()
 
   const [draft, setDraft] = useState('')
+  const [editorOpen, setEditorOpen] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
   const bottom = useRef<HTMLDivElement>(null)
+
+  const editingCard = studioEditId ? (cards.find((card) => card.id === studioEditId) ?? null) : null
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
@@ -107,6 +116,32 @@ export default function CharactersView() {
     if (!text || studioStreaming) return
     setDraft('')
     await studioSend(text)
+  }
+
+  /** 把当前选中的卡设为工坊的编辑目标；会清掉上一轮对话。 */
+  function startEdit() {
+    if (!selectedCardId || studioStreaming) return
+    if (studioEditId === selectedCardId) return
+    if (studioMessages.length > 0 && !window.confirm('开始修改这张卡会清空当前工坊对话，继续？')) return
+    studioStartEdit(selectedCardId)
+  }
+
+  /** 把当前卡原样导出为酒馆 V2 JSON；文件名取角色名，去掉文件名非法字符。 */
+  function exportCard() {
+    if (!selectedCard) return
+    const name =
+      (selectedCard.data.name || selectedCardId || 'character')
+        .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-')
+        .trim() || 'character'
+    const blob = new Blob([JSON.stringify(selectedCard, null, 2) + '\n'], {
+      type: 'application/json;charset=utf-8',
+    })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `${name}.json`
+    anchor.click()
+    URL.revokeObjectURL(url)
   }
 
   async function tryDelete() {
@@ -138,7 +173,7 @@ export default function CharactersView() {
           <div className="min-w-0 flex-1">
             <h1 className="text-sm font-semibold">工坊</h1>
             <p className="mt-0.5 truncate text-[11px] text-neutral-400">
-              聊出一个人设，模型会把成品卡存进卡库
+              {studioEditId ? '和模型聊着改这张卡，保存会覆盖原文件' : '聊出一个人设，模型会把成品卡存进卡库'}
             </p>
           </div>
           {studioSelection && (
@@ -158,16 +193,46 @@ export default function CharactersView() {
           </button>
         </header>
 
+        {studioEditId && (
+          <div className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-5 py-2 text-[11px] text-amber-900">
+            <span className="min-w-0 flex-1 truncate">
+              正在修改「{editingCard?.name ?? studioEditId}」，模型会直接更新{' '}
+              <code className="text-amber-800">characters/{studioEditId}.json</code>
+            </span>
+            <button
+              type="button"
+              onClick={studioStopEdit}
+              disabled={studioStreaming}
+              className="shrink-0 rounded border border-amber-300 px-2 py-0.5 text-amber-900 hover:bg-amber-100 disabled:opacity-40"
+            >
+              退出修改
+            </button>
+          </div>
+        )}
+
         <div className="flex-1 overflow-y-auto px-6 py-5">
           <div className="mx-auto max-w-2xl space-y-4">
             {studioMessages.length === 0 && !studioStreaming && (
               <div className="space-y-2 rounded-md border border-dashed border-neutral-200 px-4 py-6 text-center">
-                <p className="text-xs text-neutral-500">
-                  从一句想法开始，比如「一个嘴上不饶人、其实心软的旧书店老板，民国背景」。
-                </p>
-                <p className="text-[11px] text-neutral-400">
-                  设定聊得差不多，模型会自己落卡；之后每次改设定都会更新同一张卡。
-                </p>
+                {studioEditId ? (
+                  <>
+                    <p className="text-xs text-neutral-500">
+                      说说想改哪里，比如「性格再冷一点，把话痨的设定删掉」。
+                    </p>
+                    <p className="text-[11px] text-neutral-400">
+                      模型会基于这张卡现在的完整内容改，保存后仍覆盖原来那个文件。
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-xs text-neutral-500">
+                      从一句想法开始，比如「一个嘴上不饶人、其实心软的旧书店老板，民国背景」。
+                    </p>
+                    <p className="text-[11px] text-neutral-400">
+                      设定聊得差不多，模型会自己落卡；之后每次改设定都会更新同一张卡。
+                    </p>
+                  </>
+                )}
               </div>
             )}
 
@@ -214,7 +279,7 @@ export default function CharactersView() {
               }}
               rows={3}
               disabled={studioStreaming}
-              placeholder="想一个什么样的角色？"
+              placeholder={studioEditId ? '想怎么改这个角色？' : '想一个什么样的角色？'}
               className="w-full resize-none rounded-md border border-neutral-200 px-3 py-2 text-sm leading-6 outline-none placeholder:text-neutral-300 focus:border-neutral-400 disabled:bg-neutral-50"
             />
             <div className="mt-2 flex items-center justify-between">
@@ -264,6 +329,25 @@ export default function CharactersView() {
           {selectedCard && (
             <button
               type="button"
+              onClick={() => setEditorOpen(true)}
+              className="shrink-0 rounded-md border border-neutral-300 px-2 py-1 text-[11px] text-neutral-600 hover:bg-neutral-50"
+            >
+              编辑
+            </button>
+          )}
+          {selectedCard && (
+            <button
+              type="button"
+              onClick={startEdit}
+              disabled={studioStreaming || studioEditId === selectedCardId}
+              className="shrink-0 rounded-md border border-neutral-300 px-2 py-1 text-[11px] text-neutral-600 hover:bg-neutral-50 disabled:opacity-40"
+            >
+              {studioEditId === selectedCardId ? '修改中' : '用 AI 修改'}
+            </button>
+          )}
+          {selectedCard && (
+            <button
+              type="button"
               onClick={() => void tryDelete()}
               className="shrink-0 rounded-md border border-red-200 px-2 py-1 text-[11px] text-red-600 hover:bg-red-50"
             >
@@ -287,13 +371,32 @@ export default function CharactersView() {
           {!cardLoading && selectedCard && <CardPreview card={selectedCard} />}
 
           {!cardLoading && selectedCard && (
-            <p className="mt-6 border-t border-neutral-100 pt-3 text-[11px] leading-5 text-neutral-400">
-              卡存在 <code className="text-neutral-500">characters/{selectedCardId}.json</code>，是酒馆 V2
-              原样格式。要改设定，直接编辑这个文件。
-            </p>
+            <div className="mt-6 border-t border-neutral-100 pt-3">
+              <button
+                type="button"
+                onClick={exportCard}
+                className="rounded-md border border-neutral-300 px-2 py-1 text-[11px] text-neutral-600 hover:bg-neutral-50"
+              >
+                导出为 JSON
+              </button>
+              <p className="mt-2 text-[11px] leading-5 text-neutral-400">
+                卡存在 <code className="text-neutral-500">characters/{selectedCardId}.json</code>，是酒馆 V2
+                原样格式。点上方「编辑」手动改字段，或用「用 AI 修改」和模型聊着改。
+              </p>
+            </div>
           )}
         </div>
       </aside>
+
+      <CardEditorDialog
+        open={editorOpen && Boolean(selectedCard)}
+        card={selectedCard}
+        onClose={() => setEditorOpen(false)}
+        onSave={async (data) => {
+          if (!selectedCardId) return
+          await editCard(selectedCardId, data)
+        }}
+      />
     </>
   )
 }

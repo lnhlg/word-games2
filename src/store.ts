@@ -1,18 +1,23 @@
 import { create } from 'zustand'
 import {
+  applyStatusTemplate,
   createSession,
+  createTemplate,
   deleteCharacter,
   deleteSession,
+  deleteTemplate,
   deleteTurn as deleteTurnApi,
   editTurn as editTurnApi,
   exportSession,
   getCharacter,
   getSession,
   getSettings,
+  getTemplate,
   getWorkspaces,
   importCharacter,
   listCharacters,
   listSessions,
+  listTemplates,
   openWorkspace as openWorkspaceApi,
   patchSession,
   pickWorkspace,
@@ -21,6 +26,11 @@ import {
   saveCharacter,
   streamStudio,
   streamTurn,
+  suggestTemplate,
+  updateCharacter,
+  updateStatusTemplate,
+  updateStatusValue,
+  updateTemplate,
   type Effort,
   type SessionCreateInput,
   type SessionMeta,
@@ -28,9 +38,21 @@ import {
   type SettingsView,
   type Workspace,
 } from './api'
-import type { CardSummary, CharacterCard, MessageRecord, StudioMessage, TurnEvent } from './types'
+import type {
+  CardSummary,
+  CharacterCard,
+  MessageRecord,
+  StatusItem,
+  StatusTemplate,
+  StatusView,
+  StudioMessage,
+  TemplateDoc,
+  TemplateSummary,
+  TurnEvent,
+} from './types'
+import { lastTurnOf } from './turns'
 
-export type View = 'play' | 'characters'
+export type View = 'play' | 'characters' | 'status-templates'
 
 /** 工坊自己的模型选择，不写进任何一场戏。 */
 export type StudioSelection = {
@@ -51,6 +73,8 @@ interface AppState {
 
   meta: SessionMeta | null
   messages: MessageRecord[]
+  /** 当前这场戏的角色状态（模板 + 当前值 + 最近变化）。 */
+  status: StatusView | null
   sessionLoading: boolean
 
   streaming: boolean
@@ -65,11 +89,20 @@ interface AppState {
   selectedCard: CharacterCard | null
   cardLoading: boolean
 
+  /** 工作区级的状态模板库。 */
+  statusTemplates: TemplateSummary[]
+  statusTemplatesLoading: boolean
+  selectedTemplateId: string | null
+  selectedTemplate: TemplateDoc | null
+  templateLoading: boolean
+
   studioMessages: StudioMessage[]
   studioStreaming: boolean
   studioText: string
   studioAbort: AbortController | null
   studioSelection: StudioSelection | null
+  /** 非空表示工坊正在修改这张已有卡；空就是新建。 */
+  studioEditId: string | null
 
   load: () => Promise<void>
   pick: () => Promise<void>
@@ -87,18 +120,38 @@ interface AppState {
   rename: (id: string, title: string) => Promise<void>
   setStatus: (id: string, status: SessionMeta['status']) => Promise<void>
   setPerspective: (id: string, perspective: string) => Promise<void>
+  /** 手改一个状态值。 */
+  setStatusValue: (cardId: string, item: string, value: string) => Promise<void>
+  /** 整份替换状态模板（增删条目后用）。 */
+  saveStatusTemplate: (template: StatusTemplate) => Promise<void>
+  /** 把模板库里的模板套到这个角色上（快照）；templateId 空串表示清空。 */
+  applyTemplateToRole: (cardId: string, templateId: string) => Promise<void>
+
+  loadTemplates: () => Promise<void>
+  selectTemplate: (id: string | null) => Promise<void>
+  createTemplateDoc: (draft: { name: string; note: string; items: StatusItem[] }) => Promise<string>
+  updateTemplateDoc: (
+    id: string,
+    draft: { name: string; note: string; items: StatusItem[] },
+  ) => Promise<void>
+  deleteTemplateDoc: (id: string) => Promise<void>
+  /** 让 AI 生成一组状态项；cardId 可选，不挂卡就是通用模板。 */
+  suggestTemplateItems: (prompt: string, cardId?: string | null) => Promise<StatusItem[]>
   remove: (id: string) => Promise<void>
   exportMarkdown: (id: string) => Promise<string>
 
   setView: (view: View) => void
   loadCards: () => Promise<void>
   selectCard: (id: string | null) => Promise<void>
+  editCard: (id: string, data: CharacterCard['data']) => Promise<void>
   deleteCard: (id: string, force?: boolean) => Promise<void>
   importCard: (file: File) => Promise<void>
 
   studioSend: (text: string) => Promise<void>
   studioCancel: () => void
   studioReset: () => void
+  studioStartEdit: (id: string) => void
+  studioStopEdit: () => void
   setStudioSelection: (selection: StudioSelection) => void
 
   settings: SettingsView | null
@@ -126,6 +179,7 @@ export const useApp = create<AppState>((set, get) => ({
 
   meta: null,
   messages: [],
+  status: null,
   sessionLoading: false,
 
   streaming: false,
@@ -140,11 +194,18 @@ export const useApp = create<AppState>((set, get) => ({
   selectedCard: null,
   cardLoading: false,
 
+  statusTemplates: [],
+  statusTemplatesLoading: false,
+  selectedTemplateId: null,
+  selectedTemplate: null,
+  templateLoading: false,
+
   studioMessages: [],
   studioStreaming: false,
   studioText: '',
   studioAbort: null,
   studioSelection: null,
+  studioEditId: null,
 
   load: async () => {
     set({ loading: true, error: null })
@@ -161,6 +222,7 @@ export const useApp = create<AppState>((set, get) => ({
       set({ currentId: first })
       if (first) await get().loadSession(first)
       if (registry.current) await get().loadCards()
+      if (registry.current) await get().loadTemplates()
     } catch (e) {
       set({ loading: false, error: messageOf(e) })
     }
@@ -188,9 +250,11 @@ export const useApp = create<AppState>((set, get) => ({
         cards: [],
         selectedCardId: null,
         selectedCard: null,
+        studioEditId: null,
       })
       if (sessions[0]) await get().loadSession(sessions[0].id)
       await get().loadCards()
+      await get().loadTemplates()
     } catch (e) {
       set({ loading: false, error: messageOf(e) })
     }
@@ -210,9 +274,11 @@ export const useApp = create<AppState>((set, get) => ({
         cards: [],
         selectedCardId: null,
         selectedCard: null,
+        studioEditId: null,
       })
       if (sessions[0]) await get().loadSession(sessions[0].id)
       await get().loadCards()
+      await get().loadTemplates()
     } catch (e) {
       set({ loading: false, error: messageOf(e) })
       throw e
@@ -250,6 +316,7 @@ export const useApp = create<AppState>((set, get) => ({
       set({
         meta: detail.meta,
         messages: detail.messages,
+        status: detail.status,
         sessionLoading: false,
         streamText: '',
       })
@@ -265,8 +332,17 @@ export const useApp = create<AppState>((set, get) => ({
 
     const abort = new AbortController()
     const meta = get().meta
-    const last = get().messages[get().messages.length - 1]
+    const current = get().messages
+    // 失败时只落了一条大纲、回合号没有前进；找到它，别让两条大纲挤同一个回合号。
+    const pending = lastTurnOf(current)
+    const staleTurn = pending?.pending && pending.turn === (meta?.turn ?? 0) ? pending.turn : null
+    // 失败后最后一条记录是系统错误，往上找才是那条大纲。
+    const last = [...current].reverse().find((message) => message.role !== 'system')
     const alreadyShown = options?.retry === true && last?.role === 'director' && last.text === input
+    const base =
+      staleTurn === null || options?.retry === true
+        ? current
+        : current.filter((message) => message.role === 'system' || message.turn !== staleTurn)
     set({
       streaming: true,
       streamText: '',
@@ -274,9 +350,9 @@ export const useApp = create<AppState>((set, get) => ({
       error: null,
       retryInput: null,
       messages: alreadyShown
-        ? get().messages
+        ? base
         : [
-            ...get().messages,
+            ...base,
             { role: 'director', turn: meta?.turn ?? 0, at: new Date().toISOString(), text: input },
           ],
     })
@@ -289,6 +365,9 @@ export const useApp = create<AppState>((set, get) => ({
           break
         case 'delta':
           set({ streamText: state.streamText + event.text })
+          break
+        case 'status_update':
+          set({ status: event.status })
           break
         case 'error':
           set({ error: event.message, retryInput: input })
@@ -344,9 +423,9 @@ export const useApp = create<AppState>((set, get) => ({
   regenerate: async () => {
     const workspace = get().currentWorkspace
     const id = get().currentId
-    const meta = get().meta
-    if (!workspace || !id || get().streaming || !meta || meta.turn < 1) return
-    const lastTurn = meta.turn - 1
+    const last = lastTurnOf(get().messages)
+    if (!workspace || !id || get().streaming || !last) return
+    const lastTurn = last.turn
     const abort = new AbortController()
     set({
       streaming: true,
@@ -361,6 +440,7 @@ export const useApp = create<AppState>((set, get) => ({
     const apply = (event: TurnEvent) => {
       if (event.type === 'turn_start') set({ streamText: '' })
       else if (event.type === 'delta') set({ streamText: get().streamText + event.text })
+      else if (event.type === 'status_update') set({ status: event.status })
       else if (event.type === 'error') set({ error: event.message })
     }
 
@@ -395,11 +475,17 @@ export const useApp = create<AppState>((set, get) => ({
   deleteLastTurn: async () => {
     const workspace = get().currentWorkspace
     const id = get().currentId
-    const meta = get().meta
-    if (!workspace || !id || get().streaming || !meta || meta.turn < 1) return
+    const last = lastTurnOf(get().messages)
+    if (!workspace || !id || get().streaming || !last) return
     try {
-      const result = await deleteTurnApi(workspace, id, meta.turn - 1)
-      set({ meta: result.meta, messages: result.messages, error: null, retryInput: null })
+      const result = await deleteTurnApi(workspace, id, last.turn)
+      set({
+        meta: result.meta,
+        messages: result.messages,
+        status: result.status,
+        error: null,
+        retryInput: null,
+      })
       const sessions = get().currentWorkspace ? await listSessions(get().currentWorkspace!) : []
       set({ sessions })
     } catch (e) {
@@ -458,6 +544,140 @@ export const useApp = create<AppState>((set, get) => ({
     }
   },
 
+  setStatusValue: async (cardId, item, value) => {
+    const workspace = get().currentWorkspace
+    const id = get().currentId
+    if (!workspace || !id) return
+    try {
+      const status = await updateStatusValue(workspace, id, { cardId, item, value })
+      set({ status, error: null })
+    } catch (e) {
+      set({ error: messageOf(e) })
+      throw e
+    }
+  },
+
+  saveStatusTemplate: async (template) => {
+    const workspace = get().currentWorkspace
+    const id = get().currentId
+    if (!workspace || !id) return
+    try {
+      const result = await updateStatusTemplate(workspace, id, template)
+      set({
+        meta: get().meta?.id === id ? result.session : get().meta,
+        status: result.status,
+        error: null,
+      })
+    } catch (e) {
+      set({ error: messageOf(e) })
+      throw e
+    }
+  },
+
+  applyTemplateToRole: async (cardId, templateId) => {
+    const workspace = get().currentWorkspace
+    const id = get().currentId
+    if (!workspace || !id) return
+    try {
+      const result = await applyStatusTemplate(workspace, id, cardId, templateId)
+      set({
+        meta: get().meta?.id === id ? result.session : get().meta,
+        status: result.status,
+        error: null,
+      })
+    } catch (e) {
+      set({ error: messageOf(e) })
+      throw e
+    }
+  },
+
+  loadTemplates: async () => {
+    const workspace = get().currentWorkspace
+    if (!workspace) return
+    set({ statusTemplatesLoading: true })
+    try {
+      const templates = await listTemplates(workspace)
+      set({ statusTemplates: templates, statusTemplatesLoading: false })
+      if (!get().selectedTemplateId && templates[0]) await get().selectTemplate(templates[0].id)
+    } catch (e) {
+      set({ statusTemplatesLoading: false, error: messageOf(e) })
+    }
+  },
+
+  selectTemplate: async (id) => {
+    const workspace = get().currentWorkspace
+    set({ selectedTemplateId: id, selectedTemplate: null, templateLoading: Boolean(id) })
+    if (!workspace || !id) return
+    try {
+      const { template } = await getTemplate(workspace, id)
+      set({ selectedTemplate: template, templateLoading: false })
+    } catch (e) {
+      set({ templateLoading: false, error: messageOf(e) })
+    }
+  },
+
+  createTemplateDoc: async (draft) => {
+    const workspace = get().currentWorkspace
+    if (!workspace) throw new Error('先打开一个工作区')
+    try {
+      const result = await createTemplate(workspace, draft)
+      set({
+        statusTemplates: result.templates,
+        selectedTemplateId: result.id,
+        selectedTemplate: result.template,
+        error: null,
+      })
+      return result.id
+    } catch (e) {
+      set({ error: messageOf(e) })
+      throw e
+    }
+  },
+
+  updateTemplateDoc: async (id, draft) => {
+    const workspace = get().currentWorkspace
+    if (!workspace) return
+    try {
+      const result = await updateTemplate(workspace, id, draft)
+      set({
+        statusTemplates: result.templates,
+        selectedTemplate: get().selectedTemplateId === id ? result.template : get().selectedTemplate,
+        error: null,
+      })
+    } catch (e) {
+      set({ error: messageOf(e) })
+      throw e
+    }
+  },
+
+  deleteTemplateDoc: async (id) => {
+    const workspace = get().currentWorkspace
+    if (!workspace) return
+    try {
+      const templates = await deleteTemplate(workspace, id)
+      const next =
+        get().selectedTemplateId === id ? (templates[0]?.id ?? null) : get().selectedTemplateId
+      set({ statusTemplates: templates, selectedTemplateId: next, selectedTemplate: null, error: null })
+      if (next) await get().selectTemplate(next)
+    } catch (e) {
+      set({ error: messageOf(e) })
+      throw e
+    }
+  },
+
+  suggestTemplateItems: async (prompt, cardId) => {
+    const workspace = get().currentWorkspace
+    if (!workspace) return []
+    try {
+      const items = await suggestTemplate(workspace, prompt, cardId)
+      set({ error: null })
+      return items
+    } catch (e) {
+      set({ error: messageOf(e) })
+      throw e
+    }
+  },
+
   remove: async (id) => {
     const workspace = get().currentWorkspace
     if (!workspace) return
@@ -486,6 +706,7 @@ export const useApp = create<AppState>((set, get) => ({
   setView: (view) => {
     set({ view, error: null })
     if (view === 'characters' && get().cards.length === 0) void get().loadCards()
+    if (view === 'status-templates' && get().statusTemplates.length === 0) void get().loadTemplates()
   },
 
   loadCards: async () => {
@@ -515,6 +736,20 @@ export const useApp = create<AppState>((set, get) => ({
     }
   },
 
+  /** 手工编辑：保存整段 data，后端按原 id 合并（extensions 等额外字段保留）。 */
+  editCard: async (id, data) => {
+    const workspace = get().currentWorkspace
+    if (!workspace) return
+    try {
+      const result = await updateCharacter(workspace, id, data)
+      set({ selectedCardId: result.id, selectedCard: result.card, error: null })
+      await get().loadCards()
+    } catch (e) {
+      set({ error: messageOf(e) })
+      throw e
+    }
+  },
+
   deleteCard: async (id, force = false) => {
     const workspace = get().currentWorkspace
     if (!workspace) return
@@ -522,6 +757,7 @@ export const useApp = create<AppState>((set, get) => ({
       await deleteCharacter(workspace, id, force)
       const cards = get().cards.filter((card) => card.id !== id)
       set({ cards, error: null })
+      if (get().studioEditId === id) set({ studioEditId: null })
       if (get().selectedCardId === id) await get().selectCard(cards[0]?.id ?? null)
     } catch (e) {
       set({ error: messageOf(e) })
@@ -564,6 +800,7 @@ export const useApp = create<AppState>((set, get) => ({
         workspace,
         history,
         { providerId: selection.providerId, model: selection.model, reasoningEffort: selection.reasoningEffort },
+        get().studioEditId,
         (event) => {
           if (event.type === 'delta') {
             assistant += event.text
@@ -578,7 +815,12 @@ export const useApp = create<AppState>((set, get) => ({
         abort.signal,
       )
     } catch (e) {
-      if (!abort.signal.aborted) set({ error: messageOf(e) })
+      if (!abort.signal.aborted) {
+        const message = messageOf(e)
+        set({ error: message })
+        // 编辑目标已经被删掉：退出编辑态，别让下一条消息一直报 404。
+        if (message.includes('card not found')) set({ studioEditId: null })
+      }
     } finally {
       const finalText = get().studioText
       set({
@@ -599,6 +841,11 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   studioReset: () => set({ studioMessages: [], studioText: '', error: null }),
+
+  /** 进入编辑态：清掉上一轮对话，接下来每条消息都会带上这张卡的 id。 */
+  studioStartEdit: (id) => set({ studioEditId: id, studioMessages: [], studioText: '', error: null }),
+
+  studioStopEdit: () => set({ studioEditId: null }),
 
   setStudioSelection: (selection) => set({ studioSelection: selection }),
 

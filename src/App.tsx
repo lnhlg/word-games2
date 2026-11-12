@@ -3,6 +3,7 @@ import CharactersView from './CharactersView'
 import NewSessionDialog from './NewSessionDialog'
 import PlayView from './PlayView'
 import SettingsDialog from './SettingsDialog'
+import StatusTemplatesView from './StatusTemplatesView'
 import type { SessionMeta } from './api'
 import { useApp } from './store'
 
@@ -46,6 +47,11 @@ export default function App() {
     selectedCardId,
     selectCard,
     loadCards,
+    statusTemplates,
+    statusTemplatesLoading,
+    selectedTemplateId,
+    selectTemplate,
+    loadTemplates,
   } = useApp()
 
   const workspace = workspaces.find((w) => w.path === currentWorkspace) ?? null
@@ -130,25 +136,27 @@ export default function App() {
         <div className="border-b border-neutral-200 px-3 py-3">
           <div className="flex items-center justify-between">
             <span className="text-sm font-semibold tracking-tight">word-games</span>
-            <button
-              type="button"
-              onClick={() => {
-                if (!currentWorkspace) return
-                if (view === 'play') setNewSessionOpen(true)
-                else startNewCharacter()
-              }}
-              disabled={!currentWorkspace}
-              className="rounded-md bg-neutral-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {view === 'play' ? '＋ 新建' : '＋ 新角色'}
-            </button>
+            {view !== 'status-templates' && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (!currentWorkspace) return
+                  if (view === 'play') setNewSessionOpen(true)
+                  else startNewCharacter()
+                }}
+                disabled={!currentWorkspace}
+                className="rounded-md bg-neutral-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {view === 'play' ? '＋ 新建' : '＋ 新角色'}
+              </button>
+            )}
           </div>
 
-          <div className="mt-2 grid grid-cols-2 gap-1 rounded-md bg-neutral-100 p-1 text-xs">
+          <div className="mt-2 grid grid-cols-3 gap-1 rounded-md bg-neutral-100 p-1 text-xs">
             <button
               type="button"
               onClick={() => setView('play')}
-              className={`rounded px-2 py-1.5 font-medium ${
+              className={`rounded px-1 py-1.5 font-medium ${
                 view === 'play' ? 'bg-white text-neutral-900 shadow-sm' : 'text-neutral-500'
               }`}
             >
@@ -157,11 +165,20 @@ export default function App() {
             <button
               type="button"
               onClick={() => setView('characters')}
-              className={`rounded px-2 py-1.5 font-medium ${
+              className={`rounded px-1 py-1.5 font-medium ${
                 view === 'characters' ? 'bg-white text-neutral-900 shadow-sm' : 'text-neutral-500'
               }`}
             >
               角色
+            </button>
+            <button
+              type="button"
+              onClick={() => setView('status-templates')}
+              className={`rounded px-1 py-1.5 font-medium ${
+                view === 'status-templates' ? 'bg-white text-neutral-900 shadow-sm' : 'text-neutral-500'
+              }`}
+            >
+              模板
             </button>
           </div>
 
@@ -345,6 +362,36 @@ export default function App() {
               </ul>
             </>
           )}
+
+          {view === 'status-templates' && (
+            <>
+              {statusTemplatesLoading && <p className="px-2 py-3 text-xs text-neutral-400">载入模板库…</p>}
+              {!statusTemplatesLoading && currentWorkspace && statusTemplates.length === 0 && (
+                <p className="px-2 py-3 text-xs text-neutral-400">
+                  模板库还是空的。在中间写一份状态模板，或者让 AI 定一组。
+                </p>
+              )}
+              <ul className="space-y-1">
+                {statusTemplates.map((template) => (
+                  <li key={template.id}>
+                    <button
+                      type="button"
+                      onClick={() => void selectTemplate(template.id)}
+                      className={`w-full rounded-md px-2.5 py-2 text-left transition-colors ${
+                        selectedTemplateId === template.id ? 'bg-neutral-100' : 'hover:bg-neutral-50'
+                      }`}
+                    >
+                      <span className="block truncate text-sm">{template.name}</span>
+                      <span className="mt-0.5 block truncate text-xs text-neutral-500">
+                        {template.itemCount} 项
+                        {template.note ? ` · ${template.note}` : ''}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
         </div>
 
         <div className="border-t border-neutral-200 p-2">
@@ -357,6 +404,15 @@ export default function App() {
               刷新卡库
             </button>
           )}
+          {view === 'status-templates' && (
+            <button
+              type="button"
+              onClick={() => void loadTemplates()}
+              className="mb-1 w-full rounded-md px-2 py-1.5 text-left text-xs text-neutral-500 hover:bg-neutral-50 hover:text-neutral-700"
+            >
+              刷新模板库
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setSettingsOpen(true)}
@@ -367,7 +423,13 @@ export default function App() {
         </div>
       </aside>
 
-      {view === 'play' ? <PlayView onOpenSettings={() => setSettingsOpen(true)} /> : <CharactersView />}
+      {view === 'play' ? (
+        <PlayView onOpenSettings={() => setSettingsOpen(true)} />
+      ) : view === 'characters' ? (
+        <CharactersView />
+      ) : (
+        <StatusTemplatesView />
+      )}
 
       <NewSessionDialog open={newSessionOpen} onClose={() => setNewSessionOpen(false)} />
       <SettingsDialog

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { cardFileId, isCardId, normalizeCard, type CharacterCard } from './character-card'
+import { cardFileId, isCardId, isRecord, normalizeCard, type CharacterCard } from './character-card'
 
 /** 卡库列表里的一行：只带展示需要的字段。 */
 export interface CardSummary {
@@ -105,6 +105,25 @@ export function saveCard(
     id = `${base}-${index++}`
   }
 
+  writeFileSync(cardFile(workspace, id), JSON.stringify(card, null, 2) + '\n', 'utf8')
+  return { id, card }
+}
+
+/**
+ * 按原 id 更新一张已有卡：把 patch 里的字段合并到现有 data 上，没提到的字段保留。
+ * id 与文件名不变——改名只改 `data.name`，不迁移文件，避免打断已有会话的 cast 引用。
+ * 卡不存在返回 null（工坊对话期间被删的情况）。
+ */
+export function updateCard(
+  workspace: string,
+  id: string,
+  patch: unknown,
+): { id: string; card: CharacterCard } | null {
+  const existing = readCard(workspace, id)
+  if (!existing) return null
+  if (!isRecord(patch)) throw new Error('角色卡必须是 JSON 对象')
+  const patchData = isRecord(patch.data) ? patch.data : patch
+  const card = normalizeCard({ ...existing, data: { ...existing.data, ...patchData } })
   writeFileSync(cardFile(workspace, id), JSON.stringify(card, null, 2) + '\n', 'utf8')
   return { id, card }
 }

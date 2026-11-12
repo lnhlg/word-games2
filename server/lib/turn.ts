@@ -1,9 +1,10 @@
-import { appendMessage, saveNextOptions, writeMeta, type SessionMeta } from './session-fs'
+import { appendMessage, readMeta, saveNextOptions, writeMeta, type SessionMeta } from './session-fs'
 import { buildMessages } from './prompt'
 import type { CharacterCard } from './character-card'
 import { getLlmRunner } from './llm'
 import { memoryBlock, rememberBatch, type MemoryRecord } from './memory'
-import { generateNextOptions } from './options'
+import { generateTurnExtras } from './options'
+import { applyAiStatus, type StatusValue, type StatusView } from './status'
 import type { Effort, ReasoningParam } from './providers'
 
 export type TurnEvent =
@@ -11,6 +12,7 @@ export type TurnEvent =
   | { type: 'delta'; text: string }
   | { type: 'done'; turn: number }
   | { type: 'next_options'; turn: number; options: string[] }
+  | { type: 'status_update'; turn: number; status: StatusView }
   | { type: 'error'; message: string }
 
 export interface RunTurnArgs {
@@ -19,10 +21,17 @@ export interface RunTurnArgs {
   agentMd: string
   /** 参演角色的卡；缺卡的 id 已在调用方跳过。 */
   cast: CharacterCard[]
+  /** 每个角色此刻的状态，键是角色名；接在该角色段的末尾。 */
+  statusByName?: Record<string, StatusValue[]>
+  /** 角色名 → 角色卡 id；AI 更新状态时用它落回正确的角色。 */
+  nameToId?: Record<string, string>
   memories: MemoryRecord[]
   history: { role: 'director' | 'narrative'; text: string }[]
   outline: string
-  /** 覆盖回合号：重新生成最后一回合时传 meta.turn - 1。 */
+  /**
+   * 覆盖回合号：重新生成时传最后一条大纲的回合号（正常情况是 meta.turn - 1，
+   * 失败后只剩大纲的那一回合则是 meta.turn）。
+   */
   turn?: number
   /** 失败重试时复用已落盘的导演消息，不再追加一条。 */
   reuseOutline?: boolean
@@ -40,6 +49,17 @@ export interface RunTurnArgs {
 
 function now(): string {
   return new Date().toISOString()
+}
+
+/** 状态行给选项/状态那次调用看：`沈砚：好感度（35）、被怀疑（是）`。 */
+function statusLinesOf(byName: Record<string, StatusValue[]>): string {
+  return Object.entries(byName)
+    .filter(([, values]) => values.length > 0)
+    .map(
+      ([name, values]) =>
+        `${name}：${values.map((value) => `${value.name}（${value.value || '未定'}）`).join('、')}`,
+    )
+    .join('\n')
 }
 
 /** 连接可能被中断/关闭，落盘优先，emit 失败不抛。 */
@@ -73,6 +93,7 @@ export async function runTurn(args: RunTurnArgs): Promise<void> {
   const messages = buildMessages({
     agentMd: args.agentMd,
     cast,
+    castStatus: args.statusByName ?? {},
     perspective: meta.perspective ?? '第三人称限知',
     memory: memoryBlock(args.memories),
     history: args.history,
@@ -131,16 +152,27 @@ export async function runTurn(args: RunTurnArgs): Promise<void> {
 
   await args.emit({ type: 'done', turn: nextMeta.turn })
 
-  // 正文写完后单独给导演三条下一步的候选；失败或为空不影响本回合。
-  const nextOptions = await generateNextOptions({
+  // 正文写完后一次轻量调用：三条下一步的候选 + 角色状态更新。
+  // 失败或为空都不影响本回合；状态解析坏了只是不更新状态。
+  const extras = await generateTurnExtras({
     recent: narrative,
+    statusLines: statusLinesOf(args.statusByName ?? {}),
     model,
     baseUrl: args.provider?.baseUrl,
     apiKey: args.provider?.apiKey,
-  }).catch(() => [])
-  if (nextOptions.length > 0) {
-    saveNextOptions(dir, turn, nextOptions)
-    await safeEmit(args, { type: 'next_options', turn, options: nextOptions })
+  }).catch(() => ({ options: [], status: {} }))
+
+  if (extras.options.length > 0) {
+    saveNextOptions(dir, turn, extras.options)
+    await safeEmit(args, { type: 'next_options', turn, options: extras.options })
+  }
+
+  // 只有这场戏配了状态模板才落状态；AI 可改值、可提议新增，不能删条目。
+  if (args.nameToId && Object.keys(args.nameToId).length > 0) {
+    const applied = applyAiStatus(dir, readMeta(dir), turn, extras.status, args.nameToId)
+    if (applied.changed) {
+      await safeEmit(args, { type: 'status_update', turn, status: applied.view })
+    }
   }
 
   // 超过最近 8 回合后，把最早的一批压成摘要；失败不影响本回合。

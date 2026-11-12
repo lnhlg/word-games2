@@ -1,4 +1,5 @@
 import type { CharacterCard } from './character-card'
+import type { StatusValue } from './status'
 
 /**
  * 代码注入、用户不可编辑的剧场契约。
@@ -12,6 +13,7 @@ export const CONTRACT = `你是这场戏的小说家（novelist）。
 - 只写【演员表】里的角色。不要引入没交代过的人物，不要替角色做导演和大纲没有交代的重大决定，不要提前泄露后面才该发生的事。
 - 谁开口、谁沉默、谁先动，由情节自然决定；不要为了覆盖所有角色而轮流发言。
 - 保持【视角】指定的叙述人称与信息边界。
+- 若【演员表】里给出某人的当前状态，那是他此刻的处境：正文里不要直接报出条目名或数值，只写它在言行、神态上的表现。
 - 排版：自然段之间空一行；段首顶格，不要自己加空格或缩进（缩进由界面统一给）；不要用 Markdown 记号（#、**、-、>、反引号）。`
 
 export interface ChatToolCall {
@@ -30,6 +32,8 @@ export interface PromptInput {
   agentMd: string
   /** 参演角色卡；缺卡时由调用方跳过。 */
   cast: CharacterCard[]
+  /** 每个角色此刻的状态，键是角色名；接在该角色段的末尾。 */
+  castStatus?: Record<string, StatusValue[]>
   perspective: string
   /** 更早情节的摘要（memory.jsonl）。 */
   memory: string
@@ -40,7 +44,10 @@ export interface PromptInput {
 }
 
 /** 演员表：每张卡只取对写小说有用的字段；空字段整段略过。 */
-export function castBlock(cast: CharacterCard[]): string {
+export function castBlock(
+  cast: CharacterCard[],
+  castStatus: Record<string, StatusValue[]> = {},
+): string {
   if (!cast.length) return '【演员表】\n（这场戏没有角色卡。按大纲写一个没有固定角色的片段。）'
   return [
     '【演员表】',
@@ -53,6 +60,10 @@ export function castBlock(cast: CharacterCard[]): string {
       if (d.system_prompt.trim()) lines.push(`角色自带指令：${d.system_prompt.trim()}`)
       if (d.first_mes.trim()) lines.push(`首次登场的语气参考（不要照抄）：${d.first_mes.trim()}`)
       if (d.mes_example.trim()) lines.push(`对话样例：\n${d.mes_example.trim()}`)
+      const status = castStatus[d.name] ?? []
+      if (status.length) {
+        lines.push(`当前状态：${status.map((value) => `${value.name} ${value.value || '未定'}`).join('；')}`)
+      }
       return lines.join('\n')
     }),
   ].join('\n\n')
@@ -82,7 +93,7 @@ export function buildMessages(input: PromptInput): ChatMessage[] {
   const system = [
     CONTRACT,
     input.agentMd.trim(),
-    castBlock(input.cast),
+    castBlock(input.cast, input.castStatus ?? {}),
     `【视角】\n${input.perspective.trim() || '第三人称限知'}`,
   ]
     .filter(Boolean)

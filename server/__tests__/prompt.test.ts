@@ -112,6 +112,23 @@ describe('buildMessages 组装顺序', () => {
     expect(block).not.toContain('人物设定：')
     expect(block).toContain('性格：嘴硬心软')
   })
+
+  it('演员表把当前状态接在角色段末尾，空值写「未定」', () => {
+    const block = castBlock([card('沈砚'), card('阿箬')], {
+      沈砚: [
+        { name: '好感度', value: '35' },
+        { name: '被怀疑', value: '' },
+      ],
+    })
+    expect(block).toContain('当前状态：好感度 35；被怀疑 未定')
+    // 没有状态的角色不产生这一行。
+    expect(block.split('当前状态：')).toHaveLength(2)
+  })
+
+  it('契约里写明状态不要直接报数值', () => {
+    expect(CONTRACT).toContain('当前状态')
+    expect(CONTRACT).toContain('不要直接报出条目名或数值')
+  })
 })
 
 describe('resolveAgentMd 优先级', () => {

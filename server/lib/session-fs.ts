@@ -2,6 +2,15 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, w
 import path from 'node:path'
 import { defaultSelection, type Effort } from './providers'
 
+/** 一个状态项：看什么。值在 status.jsonl 里，不在模板里。 */
+export interface StatusItem {
+  name: string
+  note: string
+}
+
+/** 一场戏里每个角色的状态项清单，键是角色卡 id；缺省表示这场戏没启用角色状态。 */
+export type StatusTemplate = Record<string, StatusItem[]>
+
 export interface SessionMeta {
   id: string
   title: string
@@ -14,6 +23,10 @@ export interface SessionMeta {
   perspective?: string
   /** 参演角色卡的 id；空数组表示一场没有角色的独白。 */
   cast?: string[]
+  /** 角色状态的模板：每个角色看哪些维度；值随回合变化，存在 status.jsonl。 */
+  statusTemplate?: StatusTemplate
+  /** 每个角色当前套用的是模板库里的哪一份；只作来源记录，实际定义看 statusTemplate。 */
+  statusTemplateIds?: Record<string, string>
   createdAt: string
   updatedAt: string
   turn: number
@@ -206,6 +219,28 @@ export function withNextOptions(
   return { messages: next, found }
 }
 
+/**
+ * 最后一条非 system 记录所属的回合，删除与重新生成的判定都以它为准。
+ * 生成失败时不占回合号，于是大纲的回合号会比 `meta.turn - 1` 多出一格，
+ * 这条「失败后只留下大纲」的回合同样算最后一回合，可以重新生成或删除。
+ * `pending` 表示这一回合还没有情节。
+ */
+export function lastTurnOf(messages: MessageRecord[]): { turn: number; pending: boolean } | null {
+  let last: Exclude<MessageRecord, { role: 'system' }> | null = null
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]
+    if (message.role !== 'system') {
+      last = message
+      break
+    }
+  }
+  if (!last) return null
+  return {
+    turn: last.turn,
+    pending: !messages.some((message) => message.role === 'narrative' && message.turn === last.turn),
+  }
+}
+
 /** 删除最后一回合；该回合没有任何记录时返回 false。 */
 export function deleteTurnFiles(dir: string, turn: number): boolean {
   const messages = readMessages(dir)
@@ -279,8 +314,8 @@ function clockOf(iso: string): string {
   return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
 }
 
-/** 把一场戏导出为 Markdown 小说：元信息 + 回合大纲与情节。 */
-export function exportMarkdown(meta: SessionMeta, messages: MessageRecord[]): string {
+/** 把一场戏导出为 Markdown 小说：元信息 + 回合大纲与情节；appendix 接在剧情之后。 */
+export function exportMarkdown(meta: SessionMeta, messages: MessageRecord[], appendix = ''): string {
   const statusText = meta.status === 'ended' ? '已落笔' : meta.status === 'archived' ? '已归档' : '进行中'
   const lines: string[] = [
     `# ${meta.title}`,
@@ -316,6 +351,8 @@ export function exportMarkdown(meta: SessionMeta, messages: MessageRecord[]): st
       lines.push(m.text + (m.interrupted ? '（此回合生成被中断）' : ''), '')
     }
   }
+
+  if (appendix.trim()) lines.push('', appendix.trim())
 
   return lines.join('\n')
 }

@@ -9,8 +9,10 @@ import {
   readCard,
   referencedBy,
   saveCard,
+  updateCard,
 } from '../lib/card-store'
 import { parseCardBuffer } from '../lib/character-card'
+import type { CharacterCard } from '../lib/character-card'
 import { getLlmRunner } from '../lib/llm'
 import { defaultModel } from '../lib/session-fs'
 import { isEffort, resolveSelection } from '../lib/providers'
@@ -60,6 +62,18 @@ const STUDIO_SYSTEM = `你是角色卡工坊的合写助手。用户会和你讨
 - 每次修改设定后都要重新调用一次 save_character_card，让卡库与讨论同步。
 - 卡里的字段会原样进入写小说的提示词，所以要写具体、可执行，避免空话。`
 
+/** 编辑已有卡时追加到系统提示的上下文：把这张卡的现状整张摊给模型。 */
+function editBrief(id: string, card: CharacterCard): string {
+  return `现在你要修改的是一张已有的角色卡，文件是 characters/${id}.json，它当前的内容如下：
+
+${JSON.stringify(card, null, 2)}
+
+修改规则：
+- 只改用户点到的部分，其余字段原样保留。调用 save_character_card 时把整张卡的字段都填上（没改的照抄一遍），缺掉的字段会被当成清空。
+- 保存会覆盖上面这张卡：id 与文件名保持不变，就算角色改了名也还是同一张卡，不要另存一张新卡。
+- 用户明确说要另一张新卡时，先问一句再动手。`
+}
+
 app.get('/', (c) => {
   const workspace = workspaceOf(c)
   if (!workspace) return c.json({ error: 'workspace required' }, 400)
@@ -94,6 +108,30 @@ app.post('/', async (c) => {
     if (error instanceof CardExistsError) {
       return c.json({ error: error.message, exists: error.id }, 409)
     }
+    const message = error instanceof Error ? error.message : String(error)
+    return c.json({ error: message }, 400)
+  }
+})
+
+/** 手工编辑：只收 data 段，按原 id 合并保存；未提交的字段与额外字段（extensions 等）保留。 */
+app.patch('/:id', async (c) => {
+  const workspace = workspaceOf(c)
+  if (!workspace) return c.json({ error: 'workspace required' }, 400)
+  const id = c.req.param('id')
+
+  let body: { data?: unknown } = {}
+  try {
+    body = (await c.req.json()) as { data?: unknown }
+  } catch {
+    return c.json({ error: 'invalid json' }, 400)
+  }
+  if (!body.data || typeof body.data !== 'object') return c.json({ error: 'data required' }, 400)
+
+  try {
+    const saved = updateCard(workspace, id, body.data)
+    if (!saved) return c.json({ error: 'card not found' }, 404)
+    return c.json({ id: saved.id, card: saved.card })
+  } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     return c.json({ error: message }, 400)
   }
@@ -147,6 +185,8 @@ app.post('/studio', async (c) => {
     model?: unknown
     providerId?: unknown
     reasoningEffort?: unknown
+    /** 编辑已有卡时传它的 id；不传就是新建。 */
+    cardId?: unknown
   } = {}
   try {
     body = (await c.req.json()) as typeof body
@@ -171,12 +211,23 @@ app.post('/studio', async (c) => {
     reasoningEffort: isEffort(body.reasoningEffort) ? body.reasoningEffort : null,
   })
 
+  // 编辑态：读一次当前卡注入上下文；卡不存在就明确报错，避免悄悄新建出一张同名卡。
+  const cardId = typeof body.cardId === 'string' && body.cardId.trim() ? body.cardId.trim() : null
+  const editing = cardId ? readCard(workspace, cardId) : null
+  if (cardId && !editing) return c.json({ error: 'card not found' }, 404)
+
   return streamSSE(c, async (stream) => {
     const abort = new AbortController()
     stream.onAbort(() => abort.abort())
     const emit = (event: unknown) => stream.writeSSE({ data: JSON.stringify(event) })
 
-    const messages: ChatMessage[] = [{ role: 'system', content: STUDIO_SYSTEM }, ...history]
+    const messages: ChatMessage[] = [
+      {
+        role: 'system',
+        content: editing && cardId ? `${STUDIO_SYSTEM}\n\n${editBrief(cardId, editing)}` : STUDIO_SYSTEM,
+      },
+      ...history,
+    ]
 
     try {
       for (let step = 0; step < 4; step++) {
@@ -222,7 +273,10 @@ app.post('/studio', async (c) => {
           }
           try {
             const parsed = call.args ? (JSON.parse(call.args) as unknown) : {}
-            const saved = saveCard(workspace, parsed, 'overwrite')
+            const saved = editing && cardId
+              ? updateCard(workspace, cardId, parsed)
+              : saveCard(workspace, parsed, 'overwrite')
+            if (!saved) throw new Error('角色卡已不存在')
             await emit({ type: 'card_saved', id: saved.id, card: saved.card })
             messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: true, id: saved.id }) })
           } catch (error) {

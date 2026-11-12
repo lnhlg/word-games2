@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import ModelPicker, { type PickerSelection } from './ModelPicker'
+import StatusPanel from './StatusPanel'
+import TemplatePickerDialog from './TemplatePickerDialog'
 import { splitParagraphs } from './narrative'
 import { useApp } from './store'
-import type { MessageRecord } from './types'
+import { lastDirectorIndex, lastTurnOf } from './turns'
+import type { MessageRecord, StatusItem } from './types'
 
 interface Props {
   onOpenSettings: () => void
@@ -187,6 +190,7 @@ export default function PlayView({ onOpenSettings }: Props) {
   const {
     meta,
     messages,
+    status,
     sessionLoading,
     streaming,
     streamText,
@@ -201,6 +205,12 @@ export default function PlayView({ onOpenSettings }: Props) {
     setPerspective,
     setStatus,
     setSelection,
+    setStatusValue,
+    saveStatusTemplate,
+    applyTemplateToRole,
+    statusTemplates,
+    statusTemplatesLoading,
+    loadTemplates,
     selectCard,
     setView,
   } = useApp()
@@ -211,11 +221,13 @@ export default function PlayView({ onOpenSettings }: Props) {
   const [editText, setEditText] = useState('')
   const [editBusy, setEditBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  const [pickFor, setPickFor] = useState<string | null>(null)
   const composer = useRef<HTMLTextAreaElement>(null)
   const bottom = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     setPerspectiveDraft(meta?.perspective ?? '第三人称限知')
+    setPickFor(null)
   }, [meta?.id, meta?.perspective])
 
   useEffect(() => {
@@ -272,7 +284,67 @@ export default function PlayView({ onOpenSettings }: Props) {
     setView('characters')
   }
 
-  const lastTurn = meta.turn - 1
+  const statusTemplate = status?.template ?? {}
+  /** 被编辑过的回合：它们留下的状态依据已经跟原文脱节。 */
+  const staleTurns = new Set(
+    messages
+      .filter(
+        (message): message is Extract<MessageRecord, { role: 'narrative' }> =>
+          message.role === 'narrative' && message.edited === true,
+      )
+      .map((message) => message.turn),
+  )
+
+  function itemsOf(cardId: string): StatusItem[] {
+    return statusTemplate[cardId] ?? []
+  }
+
+  function valuesOf(cardId: string) {
+    return status?.values[cardId] ?? []
+  }
+
+  async function addStatusItem(cardId: string, name: string, note: string) {
+    const items = itemsOf(cardId)
+    if (items.length >= 8 || items.some((item) => item.name === name)) return
+    try {
+      await saveStatusTemplate({ ...statusTemplate, [cardId]: [...items, { name, note }] })
+    } catch {
+      // 错误已经写进 store.error
+    }
+  }
+
+  async function removeStatusItem(cardId: string, name: string) {
+    const items = itemsOf(cardId).filter((item) => item.name !== name)
+    const next = { ...statusTemplate }
+    if (items.length) next[cardId] = items
+    else delete next[cardId]
+    try {
+      await saveStatusTemplate(next)
+    } catch {
+      // 错误已经写进 store.error
+    }
+  }
+
+  /** 这个角色套着的模板名；用来在状态区底部标来源。 */
+  function templateNameOf(cardId: string): string | null {
+    const templateId = meta?.statusTemplateIds?.[cardId]
+    if (!templateId) return null
+    return statusTemplates.find((template) => template.id === templateId)?.name ?? templateId
+  }
+
+  async function pickTemplate(cardId: string, templateId: string) {
+    setPickFor(null)
+    try {
+      await applyTemplateToRole(cardId, templateId)
+    } catch {
+      // 错误已经写进 store.error
+    }
+  }
+
+  // 失败的那一回合只留下大纲、回合号没有前进，它同样是最后一回合。
+  const last = lastTurnOf(messages)
+  const lastTurn = last?.turn ?? -1
+  const lastDirector = lastDirectorIndex(messages)
   const narrativeOf = (turn: number) =>
     messages.find((message) => message.role === 'narrative' && message.turn === turn) ?? null
 
@@ -304,8 +376,11 @@ export default function PlayView({ onOpenSettings }: Props) {
     }
   }
 
-  async function handleDelete(turn: number) {
-    if (!window.confirm('删除这一回合？导演大纲和情节都会删掉，前面的剧情不受影响。')) return
+  async function handleDelete(hasNarrative: boolean) {
+    const question = hasNarrative
+      ? '删除这一回合？导演大纲和情节都会删掉，前面的剧情不受影响。'
+      : '删除这条没生成出正文的大纲？前面的剧情不受影响。'
+    if (!window.confirm(question)) return
     try {
       await deleteLastTurn()
     } catch {
@@ -386,12 +461,12 @@ export default function PlayView({ onOpenSettings }: Props) {
                 <Director
                   key={index}
                   message={message}
-                  isLast={message.turn === lastTurn}
+                  isLast={index === lastDirector}
                   hasNarrative={narrativeOf(message.turn) !== null}
                   busy={streaming || editBusy}
                   onRegenerate={() => void regenerate()}
                   onEdit={() => startEdit(message.turn)}
-                  onDelete={() => void handleDelete(message.turn)}
+                  onDelete={() => void handleDelete(narrativeOf(message.turn) !== null)}
                 />
               ) : message.role === 'narrative' ? (
                 <Narrative
@@ -492,7 +567,7 @@ export default function PlayView({ onOpenSettings }: Props) {
         </div>
       </main>
 
-      <aside className="flex w-[260px] shrink-0 flex-col">
+      <aside className="flex w-[320px] shrink-0 flex-col">
         <div className="border-b border-neutral-200 px-4 py-2.5">
           <h2 className="text-xs font-semibold text-neutral-500">参演角色</h2>
         </div>
@@ -506,11 +581,11 @@ export default function PlayView({ onOpenSettings }: Props) {
             {cast.map((id) => {
               const card = summaryOf(id)
               return (
-                <li key={id}>
+                <li key={id} className="rounded-md border border-neutral-200">
                   <button
                     type="button"
                     onClick={() => openCard(id)}
-                    className="w-full rounded-md border border-neutral-200 px-3 py-2 text-left hover:border-neutral-300 hover:bg-neutral-50"
+                    className="block w-full px-3 pb-1.5 pt-2 text-left hover:bg-neutral-50"
                   >
                     {card ? (
                       <>
@@ -533,6 +608,24 @@ export default function PlayView({ onOpenSettings }: Props) {
                       </>
                     )}
                   </button>
+                  {card && (
+                    <StatusPanel
+                      cardId={id}
+                      items={itemsOf(id)}
+                      values={valuesOf(id)}
+                      recent={status?.recent ?? []}
+                      staleTurns={staleTurns}
+                      templateName={templateNameOf(id)}
+                      disabled={streaming}
+                      onSetValue={(item, value) => void setStatusValue(id, item, value).catch(() => {})}
+                      onAddItem={(name, note) => void addStatusItem(id, name, note)}
+                      onRemoveItem={(item) => void removeStatusItem(id, item)}
+                      onPickTemplate={() => {
+                        void loadTemplates()
+                        setPickFor(id)
+                      }}
+                    />
+                  )}
                 </li>
               )
             })}
@@ -540,10 +633,22 @@ export default function PlayView({ onOpenSettings }: Props) {
         </div>
         <div className="border-t border-neutral-200 px-3 py-2">
           <p className="text-[11px] leading-5 text-neutral-400">
-            模型只写演员表上的角色。想加人，先到「角色」页建卡，再开新的一场戏。
+            模型只写演员表上的角色。状态由 AI 每回合更新，点一下值可以自己改。
           </p>
         </div>
       </aside>
+
+      <TemplatePickerDialog
+        open={pickFor !== null}
+        cardName={summaryOf(pickFor ?? '')?.name ?? pickFor ?? ''}
+        templates={statusTemplates}
+        currentId={pickFor ? (meta?.statusTemplateIds?.[pickFor] ?? null) : null}
+        loading={statusTemplatesLoading}
+        onClose={() => setPickFor(null)}
+        onPick={(templateId) => {
+          if (pickFor) void pickTemplate(pickFor, templateId)
+        }}
+      />
     </>
   )
 }

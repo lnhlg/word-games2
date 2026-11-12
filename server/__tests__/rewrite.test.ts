@@ -7,6 +7,7 @@ import { setLlmRunner } from '../lib/llm'
 import { memoryFile } from '../lib/memory'
 import { setOptionsRunner } from '../lib/options'
 import { readMessages, readMeta, sessionDir } from '../lib/session-fs'
+import { runTurn } from '../lib/turn'
 
 let root: string
 let sessionId: string
@@ -176,5 +177,152 @@ describe('回合管理：删除 / 编辑 / 重新生成', () => {
 
     const narrative = readMessages(dirOf()).find((message) => message.role === 'narrative')
     expect(narrative).toMatchObject({ nextOptions: ['追出去', '按兵不动', '点灯'] })
+  })
+
+  it('生成失败后，失败的那条大纲可以重新生成', async () => {
+    setLlmRunner(fakeLlm([{ fail: '上游 500' }, { text: '补出来的正文。' }]))
+    await (await postTurn('开场')).text()
+    // 失败时不占回合号，只留下大纲。
+    expect(readMeta(dirOf()).turn).toBe(0)
+
+    const res = await app.request(`/api/sessions/${sessionId}/turns/regenerate${q(root)}`, { method: 'POST' })
+    expect(res.status).toBe(200)
+    expect(parseSse(await res.text()).map((event) => event.type)).toEqual(['turn_start', 'delta', 'done'])
+
+    const messages = readMessages(dirOf())
+    expect(
+      messages
+        .filter((message) => message.role !== 'system')
+        .map((message) => ({ role: message.role, turn: message.turn, text: message.text })),
+    ).toEqual([
+      { role: 'director', turn: 0, text: '开场' },
+      { role: 'narrative', turn: 0, text: '补出来的正文。' },
+    ])
+    expect(readMeta(dirOf()).turn).toBe(1)
+  })
+
+  it('生成失败后，失败的那条大纲可以删除，回合号不后退', async () => {
+    setLlmRunner(fakeLlm([{ fail: '上游 500' }]))
+    await (await postTurn('开场')).text()
+
+    const res = await deleteTurn(0)
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { meta: { turn: number } }).meta.turn).toBe(0)
+    expect(readMessages(dirOf()).filter((message) => message.role !== 'system')).toHaveLength(0)
+  })
+
+  it('第二回合失败后，重新生成写回第二回合，不动第一回合', async () => {
+    setLlmRunner(fakeLlm([{ text: '第一段。' }, { fail: '上游 500' }, { text: '第二段。' }]))
+    await (await postTurn('第一幕')).text()
+    await (await postTurn('第二幕')).text()
+    expect(readMeta(dirOf()).turn).toBe(1)
+
+    const res = await app.request(`/api/sessions/${sessionId}/turns/regenerate${q(root)}`, { method: 'POST' })
+    expect(res.status).toBe(200)
+    expect(parseSse(await res.text()).map((event) => event.type)).toEqual(['turn_start', 'delta', 'done'])
+
+    const messages = readMessages(dirOf())
+    expect(
+      messages
+        .filter((message) => message.role !== 'system')
+        .map((message) => ({ role: message.role, turn: message.turn, text: message.text })),
+    ).toEqual([
+      { role: 'director', turn: 0, text: '第一幕' },
+      { role: 'narrative', turn: 0, text: '第一段。' },
+      { role: 'director', turn: 1, text: '第二幕' },
+      { role: 'narrative', turn: 1, text: '第二段。' },
+    ])
+    expect(readMeta(dirOf()).turn).toBe(2)
+  })
+
+  it('第二回合失败后删掉那条大纲，第一回合不受影响', async () => {
+    setLlmRunner(fakeLlm([{ text: '第一段。' }, { fail: '上游 500' }]))
+    await (await postTurn('第一幕')).text()
+    await (await postTurn('第二幕')).text()
+    expect(readMeta(dirOf()).turn).toBe(1)
+
+    expect((await deleteTurn(0)).status).toBe(400)
+    expect((await deleteTurn(1)).status).toBe(200)
+    expect(readMeta(dirOf()).turn).toBe(1)
+
+    const messages = readMessages(dirOf()).filter((message) => message.role !== 'system')
+    expect(messages).toHaveLength(2)
+    expect(messages.at(-1)).toMatchObject({ role: 'narrative', turn: 0, text: '第一段。' })
+  })
+
+  it('失败后改发另一条大纲：顶替旧大纲，不留两条同号大纲', async () => {
+    setLlmRunner(fakeLlm([{ fail: '上游 500' }, { text: '第二版。' }]))
+    await (await postTurn('第一版大纲')).text()
+    await (await postTurn('第二版大纲')).text()
+
+    const messages = readMessages(dirOf())
+    const directors = messages.filter((message) => message.role === 'director')
+    expect(directors).toHaveLength(1)
+    expect(directors[0]).toMatchObject({ turn: 0, text: '第二版大纲' })
+    expect(messages.find((message) => message.role === 'narrative')).toMatchObject({
+      turn: 0,
+      text: '第二版。',
+    })
+    expect(readMeta(dirOf()).turn).toBe(1)
+  })
+
+  it('失败后按同一大纲重试：复用那条大纲，不再追加', async () => {
+    setLlmRunner(fakeLlm([{ fail: '上游 500' }, { text: '这次成了。' }]))
+    await (await postTurn('有人敲门。')).text()
+    await (
+      await app.request(`/api/sessions/${sessionId}/turns${q(root)}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ input: '有人敲门。', retry: true }),
+      })
+    ).text()
+
+    const messages = readMessages(dirOf())
+    expect(messages.filter((message) => message.role === 'director')).toHaveLength(1)
+    expect(messages.find((message) => message.role === 'narrative')).toMatchObject({ turn: 0 })
+    expect(readMeta(dirOf()).turn).toBe(1)
+  })
+
+  it('重新生成又失败时，大纲仍在，可以再重生成或删除', async () => {
+    setLlmRunner(fakeLlm([{ fail: '上游 500' }, { fail: '上游 503' }]))
+    await (await postTurn('开场')).text()
+
+    const res = await app.request(`/api/sessions/${sessionId}/turns/regenerate${q(root)}`, { method: 'POST' })
+    expect(res.status).toBe(200)
+    expect(parseSse(await res.text()).some((event) => event.type === 'error')).toBe(true)
+
+    const directors = readMessages(dirOf()).filter((message) => message.role === 'director')
+    expect(directors).toHaveLength(1)
+    expect(readMeta(dirOf()).turn).toBe(0)
+
+    expect((await deleteTurn(0)).status).toBe(200)
+    expect(readMeta(dirOf()).turn).toBe(0)
+  })
+
+  it('中断时一个字都没收到，那一回合也能删除，回合号回退', async () => {
+    const dir = dirOf()
+    const controller = new AbortController()
+    setLlmRunner(async function* () {
+      controller.abort()
+      yield { type: 'delta' as const, text: '半截' }
+      yield { type: 'done' as const }
+    })
+    await runTurn({
+      dir,
+      meta: readMeta(dir),
+      agentMd: '',
+      cast: [],
+      memories: [],
+      history: [],
+      outline: '有人敲门。',
+      signal: controller.signal,
+      emit: () => {},
+    })
+    // 中断占掉一个回合号，但没有正文落盘。
+    expect(readMeta(dir).turn).toBe(1)
+
+    expect((await deleteTurn(0)).status).toBe(200)
+    expect(readMeta(dir).turn).toBe(0)
+    expect(readMessages(dir).filter((message) => message.role !== 'system')).toHaveLength(0)
   })
 })

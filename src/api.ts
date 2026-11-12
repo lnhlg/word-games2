@@ -1,4 +1,16 @@
-import type { CardSummary, CharacterCard, MessageRecord, StudioEvent, StudioMessage, TurnEvent } from './types'
+import type {
+  CardSummary,
+  CharacterCard,
+  MessageRecord,
+  StatusItem,
+  StatusTemplate,
+  StatusView,
+  StudioEvent,
+  StudioMessage,
+  TemplateDoc,
+  TemplateSummary,
+  TurnEvent,
+} from './types'
 
 export const EFFORTS = ['low', 'medium', 'high', 'max'] as const
 export type Effort = (typeof EFFORTS)[number]
@@ -40,6 +52,8 @@ export interface SessionMeta {
   reasoningEffort?: Effort | null
   perspective?: string
   cast?: string[]
+  /** 每个角色套用的是模板库里的哪一份；只作来源记录。 */
+  statusTemplateIds?: Record<string, string>
   createdAt: string
   updatedAt: string
   turn: number
@@ -49,6 +63,7 @@ export interface SessionMeta {
 export interface SessionDetail {
   meta: SessionMeta
   messages: MessageRecord[]
+  status: StatusView
 }
 
 export interface Workspace {
@@ -245,11 +260,136 @@ export async function deleteTurn(
   workspace: string,
   id: string,
   turn: number,
-): Promise<{ meta: SessionMeta; messages: MessageRecord[] }> {
-  return request<{ meta: SessionMeta; messages: MessageRecord[] }>(
+): Promise<{ meta: SessionMeta; messages: MessageRecord[]; status: StatusView }> {
+  return request<{ meta: SessionMeta; messages: MessageRecord[]; status: StatusView }>(
     `/api/sessions/${encodeURIComponent(id)}/turns/${turn}?workspace=${encodeURIComponent(workspace)}`,
     { method: 'DELETE' },
   )
+}
+
+// —— 角色状态 ——
+
+/** 整份替换状态模板（导演在面板里增删条目后用）。 */
+export async function updateStatusTemplate(
+  workspace: string,
+  id: string,
+  template: StatusTemplate,
+): Promise<{ session: SessionMeta; status: StatusView }> {
+  return request<{ session: SessionMeta; status: StatusView }>(
+    `/api/sessions/${encodeURIComponent(id)}/status/template?workspace=${encodeURIComponent(workspace)}`,
+    {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ template }),
+    },
+  )
+}
+
+/** 手改一个状态值。 */
+export async function updateStatusValue(
+  workspace: string,
+  id: string,
+  input: { cardId: string; item: string; value: string },
+): Promise<StatusView> {
+  const { status } = await request<{ status: StatusView }>(
+    `/api/sessions/${encodeURIComponent(id)}/status/value?workspace=${encodeURIComponent(workspace)}`,
+    {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    },
+  )
+  return status
+}
+
+/** 把模板库里的某个模板套到这个角色上（快照复制）；templateId 传空串表示清空。 */
+export async function applyStatusTemplate(
+  workspace: string,
+  id: string,
+  cardId: string,
+  templateId: string,
+): Promise<{ session: SessionMeta; status: StatusView }> {
+  return request<{ session: SessionMeta; status: StatusView }>(
+    `/api/sessions/${encodeURIComponent(id)}/status/apply-template?workspace=${encodeURIComponent(workspace)}`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cardId, templateId }),
+    },
+  )
+}
+
+// —— 状态模板库（工作区级，可跨戏复用）——
+
+export async function listTemplates(workspace: string): Promise<TemplateSummary[]> {
+  const { templates } = await request<{ templates: TemplateSummary[] }>(
+    `/api/status-templates?workspace=${encodeURIComponent(workspace)}`,
+  )
+  return templates
+}
+
+export async function getTemplate(workspace: string, id: string): Promise<{ id: string; template: TemplateDoc }> {
+  return request<{ id: string; template: TemplateDoc }>(
+    `/api/status-templates/${encodeURIComponent(id)}?workspace=${encodeURIComponent(workspace)}`,
+  )
+}
+
+export async function createTemplate(
+  workspace: string,
+  template: { name: string; note: string; items: StatusItem[] },
+  overwrite = false,
+): Promise<{ id: string; template: TemplateDoc; templates: TemplateSummary[] }> {
+  return request<{ id: string; template: TemplateDoc; templates: TemplateSummary[] }>(
+    `/api/status-templates?workspace=${encodeURIComponent(workspace)}`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ template, overwrite }),
+    },
+  )
+}
+
+export async function updateTemplate(
+  workspace: string,
+  id: string,
+  template: { name?: string; note?: string; items?: StatusItem[] },
+): Promise<{ id: string; template: TemplateDoc; templates: TemplateSummary[] }> {
+  return request<{ id: string; template: TemplateDoc; templates: TemplateSummary[] }>(
+    `/api/status-templates/${encodeURIComponent(id)}?workspace=${encodeURIComponent(workspace)}`,
+    {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ template }),
+    },
+  )
+}
+
+export async function deleteTemplate(
+  workspace: string,
+  id: string,
+): Promise<TemplateSummary[]> {
+  const { templates } = await request<{ ok: boolean; templates: TemplateSummary[] }>(
+    `/api/status-templates/${encodeURIComponent(id)}?workspace=${encodeURIComponent(workspace)}`,
+    { method: 'DELETE' },
+  )
+  return templates
+}
+
+/** 让 AI 生成一组状态项；cardId 可选，不挂卡就是通用模板。 */
+export async function suggestTemplate(
+  workspace: string,
+  prompt: string,
+  cardId?: string | null,
+): Promise<StatusItem[]> {
+  const { items } = await request<{ items: StatusItem[] }>(
+    `/api/status-templates/suggest?workspace=${encodeURIComponent(workspace)}`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt, ...(cardId ? { cardId } : {}) }),
+    },
+  )
+  return items
 }
 
 // —— 角色卡库 ——
@@ -294,6 +434,22 @@ export async function importCharacter(
   )
 }
 
+/** 手工编辑一张已有卡：只提交 data 段，extensions 等额外字段由后端保留。 */
+export async function updateCharacter(
+  workspace: string,
+  id: string,
+  data: CharacterCard['data'],
+): Promise<{ id: string; card: CharacterCard }> {
+  return request<{ id: string; card: CharacterCard }>(
+    `/api/characters/${encodeURIComponent(id)}?workspace=${encodeURIComponent(workspace)}`,
+    {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ data }),
+    },
+  )
+}
+
 export async function deleteCharacter(workspace: string, id: string, force = false): Promise<void> {
   await request<{ ok: boolean }>(
     `/api/characters/${encodeURIComponent(id)}?workspace=${encodeURIComponent(workspace)}${force ? '&force=1' : ''}`,
@@ -301,18 +457,19 @@ export async function deleteCharacter(workspace: string, id: string, force = fal
   )
 }
 
-/** 工坊对话：模型可随时落卡，card_saved 事件带回整张卡。 */
+/** 工坊对话：模型可随时落卡，card_saved 事件带回整张卡；cardId 非空表示正在改已有卡。 */
 export async function streamStudio(
   workspace: string,
   messages: StudioMessage[],
   selection: { providerId: string | null; model: string; reasoningEffort: Effort | null },
+  cardId: string | null,
   onEvent: (event: StudioEvent) => void,
   signal: AbortSignal,
 ): Promise<void> {
   const res = await fetch(`/api/characters/studio?workspace=${encodeURIComponent(workspace)}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ messages, ...selection }),
+    body: JSON.stringify({ messages, ...selection, ...(cardId ? { cardId } : {}) }),
     signal,
   })
   await readSse(res, onEvent)
