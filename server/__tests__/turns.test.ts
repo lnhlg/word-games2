@@ -287,4 +287,34 @@ describe('POST /turns，假 LLM 驱动', () => {
     await res.text()
     expect(systemText).toContain('【专用设定】')
   })
+
+  it('改 AGENT.md 后下一回合立即生效，无需重启', async () => {
+    const dir = sessionDir(root, sessionId)
+    let systemText = ''
+    setLlmRunner(async function* (params) {
+      systemText = params.messages
+        .filter((message) => message.role === 'system')
+        .map((message) => message.content)
+        .join('\n')
+      yield { type: 'delta' as const, text: '好。' }
+      yield {
+        type: 'tool_call' as const,
+        toolCall: {
+          id: 'call_end',
+          name: 'end_turn',
+          args: JSON.stringify({ narrative: '', options: ['走', '停'] }),
+        },
+      }
+      yield { type: 'done' as const, finishReason: 'stop' }
+    })
+
+    writeFileSync(path.join(dir, 'AGENT.md'), '【第一版】按第一版行事。', 'utf8')
+    await (await postTurn('一')).text()
+    expect(systemText).toContain('【第一版】')
+
+    writeFileSync(path.join(dir, 'AGENT.md'), '【第二版】按第二版行事。', 'utf8')
+    await (await postTurn('二')).text()
+    expect(systemText).toContain('【第二版】')
+    expect(systemText).not.toContain('【第一版】')
+  })
 })

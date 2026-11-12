@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { Hono, type Context } from 'hono'
 import { streamSSE } from 'hono/streaming'
@@ -18,6 +18,7 @@ import {
   type MessageRecord,
   type SessionMeta,
 } from '../lib/session-fs'
+import { resolveAgentMd } from '../lib/agent-md'
 import { runTurn } from '../lib/turn'
 import { loadWorld } from '../lib/world'
 
@@ -150,13 +151,7 @@ app.post('/:id/turns', async (c) => {
   const world = loadWorld(dir)
   const history = extractHistory(visibleMessages(readMessages(dir), meta))
 
-  const modelFile = path.join(dir, `${meta.model}.md`)
-  const agentFile = path.join(dir, 'AGENT.md')
-  const agentMd = existsSync(modelFile)
-    ? readFileSync(modelFile, 'utf8')
-    : existsSync(agentFile)
-      ? readFileSync(agentFile, 'utf8')
-      : ''
+  const agentMd = resolveAgentMd(dir, meta.model)
 
   return streamSSE(c, async (stream) => {
     const abort = new AbortController()
