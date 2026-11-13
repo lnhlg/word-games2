@@ -14,6 +14,7 @@ import {
   readMeta,
   readSession,
   removeSession,
+  saveNextOptions,
   sessionDir,
   withoutNarrative,
   withoutTurn,
@@ -27,6 +28,9 @@ import { readMemories, rememberedUntil } from '../lib/memory'
 import { loadCards, readCard } from '../lib/card-store'
 import { isEffort, resolveSelection, type Effort } from '../lib/providers'
 import { runTurn } from '../lib/turn'
+import { locateSelection } from '../lib/selection'
+import { generateNextOptions, statusLinesOf } from '../lib/options'
+import { generateRewrite, REWRITE_MAX_CHARS } from '../lib/rewrite'
 import {
   clearTurnStatus,
   rollbackStatus,
@@ -39,6 +43,12 @@ import {
 import { readTemplate } from '../lib/status-templates'
 
 const app = new Hono()
+
+/** 重新生成时一句重写要求的长度上限；超了多半是误把一整段正文粘进来了。 */
+const INSTRUCTION_MAX_CHARS = 500
+
+/** 换选项时一句「往哪走」的想法上限；再长就不像一句想法了。 */
+const IDEA_MAX_CHARS = 300
 
 /** 会话都挂在某个工作区（磁盘目录）下，用 ?workspace= 指过去。 */
 function workspaceOf(c: Context): string | null {
@@ -164,8 +174,36 @@ app.patch('/:id', async (c) => {
   return c.json({ session: patchMeta(dir, patch) })
 })
 
-app.delete('/:id', (c) => {
+/**
+ * 开演后追加参演角色：只增不减，重复添加幂等。
+ * 新角色从下一回合起进入演员表，已写下的历史与状态记录都不回溯。
+ */
+app.post('/:id/cast', async (c) => {
   const workspace = workspaceOf(c)
+  if (!workspace) return c.json({ error: 'workspace required' }, 400)
+  const dir = sessionDir(workspace, c.req.param('id'))
+  if (!existsSync(path.join(dir, 'session.json'))) return c.json({ error: 'session not found' }, 404)
+
+  let body: { cardId?: unknown } = {}
+  try {
+    body = (await c.req.json()) as typeof body
+  } catch {
+    body = {}
+  }
+  const cardId = typeof body.cardId === 'string' ? body.cardId.trim() : ''
+  if (!cardId) return c.json({ error: 'cardId required' }, 400)
+
+  const meta = readMeta(dir)
+  const cast = meta.cast ?? []
+  // 已经在场：幂等成功，也不动 updatedAt。
+  if (cast.includes(cardId)) return c.json({ session: meta })
+  if (!readCard(workspace, cardId)) {
+    return c.json({ error: `角色卡「${cardId}」不存在`, id: cardId }, 400)
+  }
+  return c.json({ session: patchMeta(dir, { cast: [...cast, cardId] }) })
+})
+
+app.delete('/:id', (c) => {  const workspace = workspaceOf(c)
   if (!workspace) return c.json({ error: 'workspace required' }, 400)
   if (!removeSession(workspace, c.req.param('id'))) {
     return c.json({ error: 'session not found' }, 404)
@@ -360,7 +398,7 @@ app.post('/:id/turns', async (c) => {
   // 已记忆的回合不再进最近情节（它们已压成摘要）。
   const history = historyBefore(messages, meta.turn, rememberedUntil(memories))
   const cast = loadCards(workspace, meta.cast ?? [])
-  const agentMd = resolveAgentMd(dir, selection.model)
+  const agentMd = resolveAgentMd(dir, selection.model, workspace)
   const { nameToId, statusByName } = castContext(workspace, dir, meta)
 
   return streamSSE(c, async (stream) => {
@@ -461,6 +499,180 @@ app.patch('/:id/turns/:turn', async (c) => {
   })
 })
 
+/**
+ * 让 AI 只重写选中的那一小段，其余原文不动。
+ * 定位在原文里做（界面文本与磁盘原文的空白不同）；定位不到或结果异常一律不写盘。
+ * 决策见 docs/adr/0003-selection-rewrite.md。
+ */
+app.post('/:id/turns/:turn/rewrite', async (c) => {
+  const workspace = workspaceOf(c)
+  if (!workspace) return c.json({ error: 'workspace required' }, 400)
+  const id = c.req.param('id')
+  const dir = sessionDir(workspace, id)
+  if (!existsSync(path.join(dir, 'session.json'))) return c.json({ error: 'session not found' }, 404)
+
+  const turn = Number(c.req.param('turn'))
+  if (!Number.isInteger(turn) || turn < 0) return c.json({ error: 'invalid turn' }, 400)
+
+  let body: { selected?: unknown; instruction?: unknown; before?: unknown; after?: unknown } = {}
+  try {
+    body = (await c.req.json()) as typeof body
+  } catch {
+    body = {}
+  }
+  const selected = typeof body.selected === 'string' ? body.selected : ''
+  if (!selected.trim()) return c.json({ error: 'selected required' }, 400)
+  const instruction = typeof body.instruction === 'string' ? body.instruction : ''
+  const before = typeof body.before === 'string' ? body.before : ''
+  const after = typeof body.after === 'string' ? body.after : ''
+
+  const meta = readMeta(dir)
+  const messages = readMessages(dir)
+  const narrative = messages.find(
+    (message): message is Extract<MessageRecord, { role: 'narrative' }> =>
+      message.role === 'narrative' && message.turn === turn,
+  )
+  if (!narrative) return c.json({ error: '这一回合还没有情节' }, 404)
+
+  const located = locateSelection({ text: narrative.text, selected, before, after })
+  if (!located) return c.json({ error: '这段原文已经变了，重新选一次' }, 400)
+
+  let selection: ReturnType<typeof resolveSelection>
+  try {
+    selection = resolveSelection(meta)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return c.json({ error: message }, 500)
+  }
+
+  const director = messages.find((message) => message.role === 'director' && message.turn === turn)
+  const previous = [...messages]
+    .reverse()
+    .find(
+      (message): message is Extract<MessageRecord, { role: 'narrative' }> =>
+        message.role === 'narrative' && message.turn < turn,
+    )
+  const nextDirector = messages.find(
+    (message) => message.role === 'director' && message.turn === turn + 1,
+  )
+  const nextNarrative = messages.find(
+    (message): message is Extract<MessageRecord, { role: 'narrative' }> =>
+      message.role === 'narrative' && message.turn === turn + 1,
+  )
+
+  let rewritten: string
+  try {
+    rewritten = await generateRewrite({
+      outline: director?.text ?? '',
+      passage: narrative.text,
+      beforePassage: previous?.text.slice(-300) ?? '',
+      afterOutline: nextDirector?.text ?? '',
+      afterPassage: nextNarrative?.text.slice(0, 300) ?? '',
+      selected,
+      instruction,
+      model: selection.model,
+      baseUrl: selection.provider?.baseUrl,
+      apiKey: selection.provider?.apiKey,
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.error(`[rewrite] ${id} 回合 ${turn} 改写失败：${message}`)
+    return c.json({ error: message }, 502)
+  }
+
+  if (!rewritten) return c.json({ error: '模型没给出改写结果，重试一次' }, 400)
+  if (rewritten.length > REWRITE_MAX_CHARS) {
+    return c.json({ error: '这次改写跑偏了，换个说法再试' }, 400)
+  }
+
+  const nextText = narrative.text.slice(0, located.start) + rewritten + narrative.text.slice(located.end)
+  if (!editNarrativeFile(dir, turn, nextText)) return c.json({ error: '这一回合还没有情节' }, 404)
+
+  return c.json({
+    ok: true,
+    rewritten,
+    memoryStale: turn < rememberedUntil(readMemories(dir)),
+    messages: readMessages(dir),
+  })
+})
+
+/**
+ * 单独为最后一回合再想一批后续选项：不写正文、不动状态，只覆盖该回合的 nextOptions。
+ * 选项要接住这一回合的结尾，所以只接受最后一回合，且这一回合必须有情节。
+ */
+app.post('/:id/turns/:turn/options', async (c) => {
+  const workspace = workspaceOf(c)
+  if (!workspace) return c.json({ error: 'workspace required' }, 400)
+  const id = c.req.param('id')
+  const dir = sessionDir(workspace, id)
+  if (!existsSync(path.join(dir, 'session.json'))) return c.json({ error: 'session not found' }, 404)
+
+  const turn = Number(c.req.param('turn'))
+  if (!Number.isInteger(turn) || turn < 0) return c.json({ error: 'invalid turn' }, 400)
+
+  const meta = readMeta(dir)
+  const messages = readMessages(dir)
+  const last = lastTurnOf(messages)
+  if (!last) return c.json({ error: '还没有可以生成选项的回合' }, 400)
+  if (turn !== last.turn) return c.json({ error: '只能为最后一回合生成选项' }, 400)
+
+  const narrative = messages.find(
+    (message): message is Extract<MessageRecord, { role: 'narrative' }> =>
+      message.role === 'narrative' && message.turn === turn,
+  )
+  if (!narrative) return c.json({ error: '这一回合还没有情节，等正文写完再想选项' }, 400)
+
+  let body: { idea?: unknown } = {}
+  try {
+    body = (await c.req.json()) as typeof body
+  } catch {
+    body = {}
+  }
+  const idea = typeof body.idea === 'string' ? body.idea.trim() : ''
+  if (idea.length > IDEA_MAX_CHARS) {
+    return c.json({ error: `想法最长 ${IDEA_MAX_CHARS} 字，短一句更好使` }, 400)
+  }
+
+  const director = [...messages]
+    .reverse()
+    .find(
+      (message): message is Extract<MessageRecord, { role: 'director' }> =>
+        message.role === 'director' && message.turn === turn,
+    )
+
+  let selection: ReturnType<typeof resolveSelection>
+  try {
+    selection = resolveSelection(meta)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return c.json({ error: message }, 500)
+  }
+
+  const { statusByName } = castContext(workspace, dir, meta)
+  let options: string[]
+  try {
+    options = await generateNextOptions({
+      outline: director?.text ?? '',
+      passage: narrative.text,
+      statusLines: statusLinesOf(statusByName),
+      perspective: meta.perspective ?? '第三人称限知',
+      previous: narrative.nextOptions,
+      idea: idea || undefined,
+      model: selection.model,
+      baseUrl: selection.provider?.baseUrl,
+      apiKey: selection.provider?.apiKey,
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.error(`[options] ${id} 回合 ${turn} 生成选项失败：${message}`)
+    return c.json({ error: message }, 502)
+  }
+
+  if (!options.length) return c.json({ error: '模型这次没给出选项，再试一次' }, 502)
+  if (!saveNextOptions(dir, turn, options)) return c.json({ error: '这一回合还没有情节' }, 404)
+  return c.json({ options, messages: readMessages(dir) })
+})
+
 /** 用同一大纲重写最后一回合；覆盖旧稿，不留版本。 */
 app.post('/:id/turns/regenerate', async (c) => {
   const workspace = workspaceOf(c)
@@ -475,6 +687,17 @@ app.post('/:id/turns/regenerate', async (c) => {
   const last = lastTurnOf(messages)
   if (!last) return c.json({ error: '还没有可以重新生成的回合' }, 400)
   const turn = last.turn
+
+  let body: { instruction?: unknown } = {}
+  try {
+    body = (await c.req.json()) as typeof body
+  } catch {
+    body = {}
+  }
+  const instruction = typeof body.instruction === 'string' ? body.instruction.trim() : ''
+  if (instruction.length > INSTRUCTION_MAX_CHARS) {
+    return c.json({ error: `重写要求最长 ${INSTRUCTION_MAX_CHARS} 字，短一句更好使` }, 400)
+  }
 
   const director = [...messages]
     .reverse()
@@ -496,7 +719,7 @@ app.post('/:id/turns/regenerate', async (c) => {
   }
   const history = historyBefore(messages, turn, rememberedUntil(memories))
   const cast = loadCards(workspace, meta.cast ?? [])
-  const agentMd = resolveAgentMd(dir, selection.model)
+  const agentMd = resolveAgentMd(dir, selection.model, workspace)
   const { nameToId, statusByName } = castContext(workspace, dir, meta)
 
   // 先清掉旧稿再重写；失败时只留下大纲，可再重写或删除。旧稿带来的状态变化一并作废。
@@ -521,6 +744,7 @@ app.post('/:id/turns/regenerate', async (c) => {
         outline: director.text,
         turn,
         reuseOutline: true,
+        instruction: instruction || undefined,
         model: selection.model,
         provider: selection.provider
           ? { baseUrl: selection.provider.baseUrl, apiKey: selection.provider.apiKey }

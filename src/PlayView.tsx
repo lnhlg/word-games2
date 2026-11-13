@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
+import AddCastDialog from './AddCastDialog'
 import ModelPicker, { type PickerSelection } from './ModelPicker'
+import OptionsIdeaBox from './OptionsIdeaBox'
+import SelectionToolbar, { type ToolbarAnchor } from './SelectionToolbar'
 import StatusPanel from './StatusPanel'
 import TemplatePickerDialog from './TemplatePickerDialog'
 import { splitParagraphs } from './narrative'
@@ -39,16 +42,55 @@ function NarrativeText({ text, caret = false }: { text: string; caret?: boolean 
 const manageButton =
   'rounded px-1.5 py-0.5 text-[11px] text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 disabled:opacity-40'
 
+/** 选区起点之前的文字（相对于整段情节节点）。 */
+function textBefore(node: HTMLElement, range: Range): string {
+  const pre = document.createRange()
+  pre.selectNodeContents(node)
+  pre.setEnd(range.startContainer, range.startOffset)
+  return pre.toString()
+}
+
+/** 选区终点之后的文字。 */
+function textAfter(node: HTMLElement, range: Range): string {
+  const post = document.createRange()
+  post.selectNodeContents(node)
+  post.setStart(range.endContainer, range.endOffset)
+  return post.toString()
+}
+
+interface SelectionState {
+  turn: number
+  /** 选中的文字。 */
+  text: string
+  /** 选区前 40 字，用于后端消歧定位。 */
+  before: string
+  /** 选区后 40 字。 */
+  after: string
+  anchor: ToolbarAnchor
+}
+
 interface NarrativeProps {
   message: Extract<MessageRecord, { role: 'narrative' }>
   editing: boolean
   editText: string
   busy: boolean
   canPickOptions: boolean
+  /** 正在为这一回合重新想选项。 */
+  optionsBusy: boolean
+  /** 这一回合的「想往哪走」输入框是否展开。 */
+  optionsPromptOpen: boolean
+  optionsIdea: string
+  /** 刚被 AI 改写过多，显示一次「撤销」。 */
+  undoable: boolean
   onEditText: (text: string) => void
   onSave: () => void
   onCancel: () => void
   onPickOption: (text: string) => void
+  onOpenOptionsPrompt: () => void
+  onOptionsIdea: (text: string) => void
+  onSubmitOptions: () => void
+  onCancelOptions: () => void
+  onUndo: () => void
 }
 
 function Narrative({
@@ -57,10 +99,19 @@ function Narrative({
   editText,
   busy,
   canPickOptions,
+  optionsBusy,
+  optionsPromptOpen,
+  optionsIdea,
+  undoable,
   onEditText,
   onSave,
   onCancel,
   onPickOption,
+  onOpenOptionsPrompt,
+  onOptionsIdea,
+  onSubmitOptions,
+  onCancelOptions,
+  onUndo,
 }: NarrativeProps) {
   if (editing) {
     return (
@@ -105,23 +156,60 @@ function Narrative({
   }
 
   return (
-    <article className="space-y-1.5">
+    <article className="space-y-1.5" data-narrative-turn={message.turn}>
       <NarrativeText text={message.text} />
-      {message.edited && <p className="text-[11px] text-neutral-400">已编辑</p>}
+      {message.instruction && (
+        <p className="line-clamp-2 text-[11px] text-neutral-400" title={message.instruction}>
+          按「{message.instruction}」重写
+        </p>
+      )}
+      {message.edited && (
+        <p className="flex items-center gap-1.5 text-[11px] text-neutral-400">
+          {undoable ? (
+            <>
+              <span>已改写</span>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={onUndo}
+                className="underline underline-offset-2 hover:text-neutral-700 disabled:opacity-40"
+              >
+                撤销
+              </button>
+            </>
+          ) : (
+            <span>已编辑</span>
+          )}
+        </p>
+      )}
       {message.interrupted && (
         <p className="text-xs italic text-neutral-400">（写到一半被打断了）</p>
       )}
       {message.nextOptions && message.nextOptions.length > 0 && (
         <div className="space-y-1.5 pt-1">
-          <p className="text-[11px] text-neutral-400">接下来可以这么演</p>
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-[11px] text-neutral-400">接下来可以这么演</p>
+            {canPickOptions && (
+              <button
+                type="button"
+                disabled={optionsBusy}
+                onClick={onOpenOptionsPrompt}
+                title="按最后一回合的结尾再想一批，可先写一句想往哪走"
+                className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 disabled:opacity-40"
+              >
+                {optionsBusy ? '想选项中…' : '换一批'}
+              </button>
+            )}
+          </div>
           <div className="flex flex-wrap gap-1.5">
             {message.nextOptions.map((option, index) =>
               canPickOptions ? (
                 <button
                   key={index}
                   type="button"
+                  disabled={optionsBusy}
                   onClick={() => onPickOption(option)}
-                  className="rounded-full border border-neutral-200 px-3 py-1 text-xs text-neutral-600 hover:border-neutral-400 hover:bg-neutral-50"
+                  className="rounded-full border border-neutral-200 px-3 py-1 text-xs text-neutral-600 hover:border-neutral-400 hover:bg-neutral-50 disabled:opacity-40"
                 >
                   {option}
                 </button>
@@ -137,6 +225,27 @@ function Narrative({
           </div>
         </div>
       )}
+      {canPickOptions && (!message.nextOptions || message.nextOptions.length === 0) && (
+        <div className="pt-1">
+          <button
+            type="button"
+            disabled={optionsBusy}
+            onClick={onOpenOptionsPrompt}
+            className="rounded-full border border-dashed border-neutral-300 px-3 py-1 text-[11px] text-neutral-500 hover:border-neutral-400 hover:bg-neutral-50 disabled:opacity-40"
+          >
+            {optionsBusy ? '想选项中…' : '＋ 想几条接下来可以这么演'}
+          </button>
+        </div>
+      )}
+      {optionsPromptOpen && (
+        <OptionsIdeaBox
+          idea={optionsIdea}
+          busy={optionsBusy}
+          onChange={onOptionsIdea}
+          onSubmit={onSubmitOptions}
+          onCancel={onCancelOptions}
+        />
+      )}
     </article>
   )
 }
@@ -146,12 +255,33 @@ interface DirectorProps {
   isLast: boolean
   hasNarrative: boolean
   busy: boolean
-  onRegenerate: () => void
+  /** 这一回合正在编辑重写要求：在导演条下方展开输入框。 */
+  regenOpen: boolean
+  regenText: string
+  regenBusy: boolean
+  onOpenRegenerate: () => void
+  onRegenText: (text: string) => void
+  onRegenSubmit: () => void
+  onRegenCancel: () => void
   onEdit: () => void
   onDelete: () => void
 }
 
-function Director({ message, isLast, hasNarrative, busy, onRegenerate, onEdit, onDelete }: DirectorProps) {
+function Director({
+  message,
+  isLast,
+  hasNarrative,
+  busy,
+  regenOpen,
+  regenText,
+  regenBusy,
+  onOpenRegenerate,
+  onRegenText,
+  onRegenSubmit,
+  onRegenCancel,
+  onEdit,
+  onDelete,
+}: DirectorProps) {
   return (
     <div className="group border-l-2 border-neutral-300 pl-3">
       <div className="flex items-start justify-between gap-2">
@@ -160,7 +290,12 @@ function Director({ message, isLast, hasNarrative, busy, onRegenerate, onEdit, o
         </p>
         <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
           {isLast && (
-            <button type="button" disabled={busy} onClick={onRegenerate} className={manageButton}>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onOpenRegenerate}
+              className={manageButton}
+            >
               重新生成
             </button>
           )}
@@ -182,6 +317,47 @@ function Director({ message, isLast, hasNarrative, busy, onRegenerate, onEdit, o
         </div>
       </div>
       <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-neutral-500">{message.text}</p>
+      {regenOpen && (
+        <div className="mt-2 rounded-md border border-neutral-200 bg-neutral-50 p-2">
+          <textarea
+            value={regenText}
+            onChange={(event) => onRegenText(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                onRegenCancel()
+              } else if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                event.preventDefault()
+                onRegenSubmit()
+              }
+            }}
+            rows={2}
+            autoFocus
+            disabled={regenBusy}
+            placeholder="这一遍想怎么改？留空 = 按原大纲再写一遍"
+            className="w-full resize-none rounded border border-neutral-200 px-2 py-1.5 text-xs leading-5 outline-none placeholder:text-neutral-300 focus:border-neutral-400 disabled:bg-white disabled:text-neutral-400"
+          />
+          <div className="mt-1.5 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onRegenSubmit}
+              disabled={regenBusy}
+              className="rounded-md bg-neutral-900 px-3 py-1 text-xs font-medium text-white hover:bg-neutral-700 disabled:opacity-40"
+            >
+              {regenBusy ? '重写中…' : '重写'}
+            </button>
+            <button
+              type="button"
+              onClick={onRegenCancel}
+              disabled={regenBusy}
+              className="rounded-md border border-neutral-300 px-3 py-1 text-xs text-neutral-600 hover:bg-neutral-50 disabled:opacity-40"
+            >
+              取消
+            </button>
+            <span className="text-[11px] text-neutral-400">Enter 重写 · Shift + Enter 换行</span>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -200,7 +376,9 @@ export default function PlayView({ onOpenSettings }: Props) {
     send,
     cancel,
     regenerate,
+    refreshOptions,
     editNarrative,
+    rewriteSelection,
     deleteLastTurn,
     setPerspective,
     setStatus,
@@ -211,6 +389,8 @@ export default function PlayView({ onOpenSettings }: Props) {
     statusTemplates,
     statusTemplatesLoading,
     loadTemplates,
+    loadCards,
+    addCast,
     selectCard,
     setView,
   } = useApp()
@@ -222,12 +402,36 @@ export default function PlayView({ onOpenSettings }: Props) {
   const [editBusy, setEditBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [pickFor, setPickFor] = useState<string | null>(null)
+  /** 当前划中的一小段；非空时浮出改写工具条。 */
+  const [selection, setSelectionState] = useState<SelectionState | null>(null)
+  const [instruction, setInstruction] = useState('')
+  const [rewriting, setRewriting] = useState(false)
+  /** 正在展开「重新生成」输入框的那一回合；null 表示没展开。 */
+  const [regenFor, setRegenFor] = useState<number | null>(null)
+  const [regenText, setRegenText] = useState('')
+  const [regenBusy, setRegenBusy] = useState(false)
+  const [addCastOpen, setAddCastOpen] = useState(false)
+  /** 正在加入的那张卡；加入期间对话框里的列表整体禁用。 */
+  const [addingCast, setAddingCast] = useState<string | null>(null)
+  /** 正在重新想选项的那一回合；null 表示没有在跑。 */
+  const [optionsFor, setOptionsFor] = useState<number | null>(null)
+  /** 正在写「想往哪走」的那一回合；null 表示输入框没开。 */
+  const [optionsPromptFor, setOptionsPromptFor] = useState<number | null>(null)
+  const [optionsIdea, setOptionsIdea] = useState('')
+  /** 刚被改写的那一回合的替换前全文；只留最近一次，刷新即失效。 */
+  const [undo, setUndo] = useState<{ turn: number; text: string } | null>(null)
+  const lastInstruction = useRef('')
   const composer = useRef<HTMLTextAreaElement>(null)
   const bottom = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     setPerspectiveDraft(meta?.perspective ?? '第三人称限知')
     setPickFor(null)
+    // 换了一场戏，上一场没提交的重写要求与选项想法都不该跟过来。
+    setRegenFor(null)
+    setRegenText('')
+    setOptionsPromptFor(null)
+    setOptionsIdea('')
   }, [meta?.id, meta?.perspective])
 
   useEffect(() => {
@@ -348,9 +552,135 @@ export default function PlayView({ onOpenSettings }: Props) {
   const narrativeOf = (turn: number) =>
     messages.find((message) => message.role === 'narrative' && message.turn === turn) ?? null
 
+  /** 读当前 DOM 选区：必须完整落在同一段情节里、并且含实际文字。 */
+  function readSelection(): SelectionState | null {
+    const active = window.getSelection()
+    if (!active || active.isCollapsed || active.rangeCount === 0) return null
+    const range = active.getRangeAt(0)
+    const start = range.startContainer
+    const startEl = start.nodeType === Node.TEXT_NODE ? start.parentElement : (start as Element | null)
+    const article = startEl?.closest('[data-narrative-turn]') as HTMLElement | null
+    // 跨消息、跨回合的选区不认。
+    if (!article || !article.contains(range.endContainer)) return null
+
+    const text = active.toString()
+    if (!/[A-Za-z0-9\u4e00-\u9fff]/.test(text)) return null
+    const turn = Number(article.dataset.narrativeTurn)
+    if (!Number.isInteger(turn)) return null
+
+    const rect = range.getBoundingClientRect()
+    const below = rect.top < 96
+    return {
+      turn,
+      text,
+      before: textBefore(article, range).slice(-40),
+      after: textAfter(article, range).slice(0, 40),
+      anchor: {
+        top: below ? rect.bottom + 8 : rect.top - 8,
+        left: Math.max(120, Math.min(window.innerWidth - 120, rect.left + rect.width / 2)),
+        below,
+      },
+    }
+  }
+
+  function handleSelectionEnd() {
+    const blocked =
+      streaming ||
+      editingTurn !== null ||
+      rewriting ||
+      regenFor !== null ||
+      optionsFor !== null ||
+      optionsPromptFor !== null
+    if (blocked) return
+    window.setTimeout(() => {
+      const next = readSelection()
+      setSelectionState(next)
+      // 记住上一次用过的指令，下次选中同一场戏的段落时预填。
+      if (next) setInstruction(lastInstruction.current)
+    }, 0)
+  }
+
+  async function submitRewrite() {
+    if (!selection || rewriting || streaming) return
+    const target = selection
+    // 先记下替换前的整段原文：撤销就是把它写回去（不恢复「已编辑」与选项）。
+    const previousText = narrativeOf(target.turn)?.text ?? ''
+    setRewriting(true)
+    try {
+      const result = await rewriteSelection(
+        target.turn,
+        target.text,
+        target.before,
+        target.after,
+        instruction.trim(),
+      )
+      lastInstruction.current = instruction.trim()
+      setUndo({ turn: target.turn, text: previousText })
+      setSelectionState(null)
+      setNotice(result.memoryStale ? '这一回合的原文已经压进摘要，改动不会同步进旧摘要。' : null)
+    } catch {
+      // 错误已经写进 store.error；浮条与指令都留着，方便换个说法再试。
+    } finally {
+      setRewriting(false)
+    }
+  }
+
+  async function undoRewrite() {
+    if (!undo || rewriting) return
+    const target = undo
+    setRewriting(true)
+    try {
+      await editNarrative(target.turn, target.text)
+      setUndo(null)
+    } catch {
+      // 错误已经写进 store.error
+    } finally {
+      setRewriting(false)
+    }
+  }
+
+  /** 点「重新生成」先展开输入框，问一句这一遍想怎么改。 */
+  function openRegenerate(turn: number) {
+    if (streaming || editBusy || rewriting) return
+    // 已经开着就别重开，免得把写了半句的要求清掉。
+    if (regenFor === turn) return
+    setSelectionState(null)
+    setEditingTurn(null)
+    setRegenFor(turn)
+    setRegenText('')
+    // 两个输入框不同时开。
+    setOptionsPromptFor(null)
+    setOptionsIdea('')
+  }
+
+  function cancelRegenerate() {
+    if (regenBusy) return
+    setRegenFor(null)
+    setRegenText('')
+  }
+
+  /** 提交重写；失败或中断时留着输入框，改一句还能再试。 */
+  async function submitRegenerate() {
+    if (regenBusy || streaming) return
+    const text = regenText.trim()
+    setRegenBusy(true)
+    try {
+      const ok = await regenerate(text)
+      if (ok) {
+        setRegenFor(null)
+        setRegenText('')
+      }
+    } finally {
+      setRegenBusy(false)
+    }
+  }
+
   function startEdit(turn: number) {
     const narrative = narrativeOf(turn)
     if (!narrative) return
+    setSelectionState(null)
+    setRegenFor(null)
+    setRegenText('')
     setEditingTurn(turn)
     setEditText(narrative.text)
   }
@@ -381,10 +711,63 @@ export default function PlayView({ onOpenSettings }: Props) {
       ? '删除这一回合？导演大纲和情节都会删掉，前面的剧情不受影响。'
       : '删除这条没生成出正文的大纲？前面的剧情不受影响。'
     if (!window.confirm(question)) return
+    setRegenFor(null)
+    setRegenText('')
     try {
       await deleteLastTurn()
     } catch {
       // 错误已经写进 store.error
+    }
+  }
+
+  /** 把卡库里的一张卡加进本场演员表；加完给一句提示，说明从下一回合起生效。 */
+  async function addCastCard(cardId: string) {
+    if (addingCast) return
+    setAddingCast(cardId)
+    try {
+      await addCast(cardId)
+      const name = cards.find((card) => card.id === cardId)?.name ?? cardId
+      setNotice(
+        `「${name}」已经加入，从下一回合起进入演员表；想让它出场，下一句大纲里交代一下。`,
+      )
+    } catch {
+      // 错误已经写进 store.error
+    } finally {
+      setAddingCast(null)
+    }
+  }
+
+  /** 点「换一批」先展开输入框，问一句这一批想往哪走；留空就是直接换。 */
+  function openOptionsPrompt(turn: number) {
+    if (optionsFor !== null || streaming) return
+    // 已经开着就别重开，免得把写了半句的想法清掉。
+    if (optionsPromptFor === turn) return
+    setOptionsPromptFor(turn)
+    setOptionsIdea('')
+    // 两个输入框不同时开。
+    setRegenFor(null)
+    setRegenText('')
+  }
+
+  function cancelOptionsPrompt() {
+    if (optionsFor !== null) return
+    setOptionsPromptFor(null)
+    setOptionsIdea('')
+  }
+
+  /** 提交想法；失败时输入框留着，改一句还能再试。 */
+  async function submitOptionsPrompt(turn: number) {
+    if (optionsFor !== null || streaming) return
+    const idea = optionsIdea.trim()
+    setOptionsFor(turn)
+    try {
+      await refreshOptions(turn, idea)
+      setOptionsPromptFor(null)
+      setOptionsIdea('')
+    } catch {
+      // 错误已经写进 store.error；输入框留着，改一句还能再试
+    } finally {
+      setOptionsFor(null)
     }
   }
 
@@ -448,7 +831,11 @@ export default function PlayView({ onOpenSettings }: Props) {
           </div>
         )}
 
-        <div className="flex-1 overflow-y-auto px-6 py-6">
+        <div
+          className="flex-1 overflow-y-auto px-6 py-6"
+          onMouseUp={handleSelectionEnd}
+          onScroll={() => setSelectionState(null)}
+        >
           <div className="mx-auto max-w-2xl space-y-6">
             {messages.length === 0 && !streaming && (
               <p className="py-16 text-center text-xs text-neutral-400">
@@ -463,8 +850,14 @@ export default function PlayView({ onOpenSettings }: Props) {
                   message={message}
                   isLast={index === lastDirector}
                   hasNarrative={narrativeOf(message.turn) !== null}
-                  busy={streaming || editBusy}
-                  onRegenerate={() => void regenerate()}
+                  busy={streaming || editBusy || rewriting || regenBusy || optionsFor !== null}
+                  regenOpen={regenFor === message.turn}
+                  regenText={regenText}
+                  regenBusy={regenBusy}
+                  onOpenRegenerate={() => openRegenerate(message.turn)}
+                  onRegenText={setRegenText}
+                  onRegenSubmit={() => void submitRegenerate()}
+                  onRegenCancel={cancelRegenerate}
                   onEdit={() => startEdit(message.turn)}
                   onDelete={() => void handleDelete(narrativeOf(message.turn) !== null)}
                 />
@@ -474,12 +867,21 @@ export default function PlayView({ onOpenSettings }: Props) {
                   message={message}
                   editing={editingTurn === message.turn}
                   editText={editText}
-                  busy={editBusy}
-                  canPickOptions={message.turn === lastTurn && !streaming && !ended}
+                  busy={editBusy || rewriting || regenBusy || optionsFor !== null}
+                  canPickOptions={message.turn === lastTurn && !streaming && !ended && !regenBusy}
+                  optionsBusy={optionsFor === message.turn}
+                  optionsPromptOpen={optionsPromptFor === message.turn}
+                  optionsIdea={optionsIdea}
+                  undoable={undo?.turn === message.turn && !streaming}
                   onEditText={setEditText}
                   onSave={() => void saveEdit(message.turn)}
                   onCancel={cancelEdit}
                   onPickOption={pickOption}
+                  onOpenOptionsPrompt={() => openOptionsPrompt(message.turn)}
+                  onOptionsIdea={setOptionsIdea}
+                  onSubmitOptions={() => void submitOptionsPrompt(message.turn)}
+                  onCancelOptions={cancelOptionsPrompt}
+                  onUndo={() => void undoRewrite()}
                 />
               ) : (
                 <p key={index} className="rounded bg-red-50 px-3 py-2 text-xs text-red-600">
@@ -568,13 +970,25 @@ export default function PlayView({ onOpenSettings }: Props) {
       </main>
 
       <aside className="flex w-[320px] shrink-0 flex-col">
-        <div className="border-b border-neutral-200 px-4 py-2.5">
+        <div className="flex items-center justify-between gap-2 border-b border-neutral-200 px-4 py-2.5">
           <h2 className="text-xs font-semibold text-neutral-500">参演角色</h2>
+          <button
+            type="button"
+            onClick={() => {
+              void loadCards()
+              setAddCastOpen(true)
+            }}
+            disabled={streaming}
+            title="从卡库里加一个还没参演的角色"
+            className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 disabled:opacity-40"
+          >
+            ＋ 加角色
+          </button>
         </div>
         <div className="flex-1 overflow-y-auto p-3">
           {cast.length === 0 && (
             <p className="px-1 py-2 text-xs text-neutral-400">
-              这场戏没有参演角色。模型只能凭大纲硬写。
+              这场戏没有参演角色。模型只能凭大纲硬写。点右上角「＋ 加角色」从卡库里挑人。
             </p>
           )}
           <ul className="space-y-2">
@@ -638,6 +1052,19 @@ export default function PlayView({ onOpenSettings }: Props) {
         </div>
       </aside>
 
+      <AddCastDialog
+        open={addCastOpen}
+        cast={cast}
+        cards={cards}
+        addingId={addingCast}
+        onClose={() => setAddCastOpen(false)}
+        onAdd={(cardId) => void addCastCard(cardId)}
+        onGoCharacters={() => {
+          setAddCastOpen(false)
+          setView('characters')
+        }}
+      />
+
       <TemplatePickerDialog
         open={pickFor !== null}
         cardName={summaryOf(pickFor ?? '')?.name ?? pickFor ?? ''}
@@ -648,6 +1075,15 @@ export default function PlayView({ onOpenSettings }: Props) {
         onPick={(templateId) => {
           if (pickFor) void pickTemplate(pickFor, templateId)
         }}
+      />
+
+      <SelectionToolbar
+        anchor={selection?.anchor ?? null}
+        instruction={instruction}
+        busy={rewriting}
+        onChange={setInstruction}
+        onSubmit={() => void submitRewrite()}
+        onClose={() => setSelectionState(null)}
       />
     </>
   )

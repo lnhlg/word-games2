@@ -41,6 +41,8 @@ export interface PromptInput {
   history: { role: 'director' | 'narrative'; text: string }[]
   /** 本回合的导演大纲。 */
   outline: string
+  /** 重新生成时导演提的重写要求；空表示按原大纲重写，不加这一段。 */
+  instruction?: string
 }
 
 /** 演员表：每张卡只取对写小说有用的字段；空字段整段略过。 */
@@ -87,7 +89,7 @@ function notesBlock(cast: CharacterCard[]): string {
 /**
  * 按 SPEC 组装 messages：
  * system = 剧场契约 → AGENT.md → 演员表 → 视角；
- * user = 更早情节摘要 → 最近情节 → 角色附注 → 本回合大纲。
+ * user = 更早情节摘要 → 最近情节 → 角色附注 → 本回合大纲 →（重新生成时）重写要求。
  */
 export function buildMessages(input: PromptInput): ChatMessage[] {
   const system = [
@@ -104,6 +106,9 @@ export function buildMessages(input: PromptInput): ChatMessage[] {
     historyBlock(input.history),
     notesBlock(input.cast),
     `【本回合大纲】\n${input.outline.trim()}`,
+    input.instruction?.trim()
+      ? `【重写要求】\n导演对上一稿不满意，按这条要求重写这一回合（大纲不变）：\n${input.instruction.trim()}`
+      : '',
   ]
     .filter(Boolean)
     .join('\n\n')

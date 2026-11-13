@@ -1,9 +1,9 @@
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import app from '../app'
-import { setLlmRunner } from '../lib/llm'
+import { setLlmRunner, type LlmParams } from '../lib/llm'
 import { setOptionsRunner } from '../lib/options'
 import { readMessages, readMeta, sessionDir } from '../lib/session-fs'
 import { runTurn } from '../lib/turn'
@@ -31,9 +31,10 @@ afterEach(() => {
 })
 
 /** 可编程假 LLM：每次调用消费脚本里的一步。 */
-function fakeLlm(script: Array<{ text?: string; fail?: string }>) {
+function fakeLlm(script: Array<{ text?: string; fail?: string }>, seen?: LlmParams[]) {
   let step = 0
-  return async function* () {
+  return async function* (params: LlmParams) {
+    seen?.push(params)
     const current = script[step] ?? { text: '（脚本结束）' }
     step += 1
     if (current.text) yield { type: 'delta' as const, text: current.text }
@@ -101,6 +102,16 @@ describe('POST /turns：假 LLM 驱动', () => {
     expect(directors).toHaveLength(1)
     expect(narratives).toHaveLength(2)
     expect(readMeta(dir).turn).toBe(2)
+  })
+
+  it('生成正文时注入工作区根的 AGENTS.md', async () => {
+    const seen: LlmParams[] = []
+    writeFileSync(path.join(root, 'AGENTS.md'), '工作区默认规则：全文用短句。', 'utf8')
+    setLlmRunner(fakeLlm([{ text: '门开了。' }], seen))
+    await (await postTurn('有人敲门。')).text()
+
+    const system = seen[0]?.messages.find((message) => message.role === 'system')?.content ?? ''
+    expect(system).toContain('工作区默认规则：全文用短句。')
   })
 
   it('空大纲返回 400', async () => {

@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import {
+  addSessionCast,
   applyStatusTemplate,
   createSession,
   createTemplate,
@@ -9,6 +10,7 @@ import {
   deleteTurn as deleteTurnApi,
   editTurn as editTurnApi,
   exportSession,
+  generateTurnOptions,
   getCharacter,
   getSession,
   getSettings,
@@ -23,6 +25,7 @@ import {
   pickWorkspace,
   putSettings,
   regenerateTurn,
+  rewriteTurn as rewriteTurnApi,
   saveCharacter,
   streamStudio,
   streamTurn,
@@ -113,13 +116,26 @@ interface AppState {
   send: (input: string, options?: { retry?: boolean }) => Promise<void>
   cancel: () => void
   retry: () => Promise<void>
-  regenerate: () => Promise<void>
+  /** 用同一大纲重写最后一回合；旧稿被覆盖。返回是否真的写成了新稿。 */
+  regenerate: (instruction?: string) => Promise<boolean>
+  /** 单独为最后一回合再想一批后续选项；idea 是导演想去的方向，空串表示不限定。 */
+  refreshOptions: (turn: number, idea?: string) => Promise<void>
   editNarrative: (turn: number, text: string) => Promise<{ memoryStale: boolean }>
+  /** 让 AI 只重写选中的那一小段；返回改写后的片段。 */
+  rewriteSelection: (
+    turn: number,
+    selected: string,
+    before: string,
+    after: string,
+    instruction: string,
+  ) => Promise<{ rewritten: string; memoryStale: boolean }>
   deleteLastTurn: () => Promise<void>
   dismissError: () => void
   rename: (id: string, title: string) => Promise<void>
   setStatus: (id: string, status: SessionMeta['status']) => Promise<void>
   setPerspective: (id: string, perspective: string) => Promise<void>
+  /** 把卡库里的一张卡加进这场戏的演员表；新角色从下一回合起进入演员表。 */
+  addCast: (cardId: string) => Promise<void>
   /** 手改一个状态值。 */
   setStatusValue: (cardId: string, item: string, value: string) => Promise<void>
   /** 整份替换状态模板（增删条目后用）。 */
@@ -419,12 +435,16 @@ export const useApp = create<AppState>((set, get) => ({
     await get().send(input, { retry: true })
   },
 
-  /** 用同一大纲重写最后一回合；旧稿被覆盖。 */
-  regenerate: async () => {
+  /**
+   * 用同一大纲重写最后一回合；旧稿被覆盖。
+   * instruction 是导演这次的重写要求，空串表示按原大纲再写一遍。
+   * 返回是否写成了新稿：失败或中断时界面要留着输入框，方便改一句再试。
+   */
+  regenerate: async (instruction = '') => {
     const workspace = get().currentWorkspace
     const id = get().currentId
     const last = lastTurnOf(get().messages)
-    if (!workspace || !id || get().streaming || !last) return
+    if (!workspace || !id || get().streaming || !last) return false
     const lastTurn = last.turn
     const abort = new AbortController()
     set({
@@ -445,7 +465,7 @@ export const useApp = create<AppState>((set, get) => ({
     }
 
     try {
-      await regenerateTurn(workspace, id, apply, abort.signal)
+      await regenerateTurn(workspace, id, instruction.trim(), apply, abort.signal)
     } catch (e) {
       if (!abort.signal.aborted) set({ error: messageOf(e) })
     } finally {
@@ -453,6 +473,28 @@ export const useApp = create<AppState>((set, get) => ({
       await get().loadSession(id)
       const sessions = get().currentWorkspace ? await listSessions(get().currentWorkspace!) : []
       set({ sessions })
+    }
+
+    return get().messages.some(
+      (message) => message.role === 'narrative' && message.turn === lastTurn && !message.interrupted,
+    )
+  },
+
+  /**
+   * 单独为最后一回合再想一批后续选项；覆盖该回合原有的候选。
+   * idea 是导演这次想去的方向，空串表示不限定。
+   * 不写正文、不动角色状态，失败时旧选项留在原地。
+   */
+  refreshOptions: async (turn, idea = '') => {
+    const workspace = get().currentWorkspace
+    const id = get().currentId
+    if (!workspace || !id) return
+    try {
+      const result = await generateTurnOptions(workspace, id, turn, idea.trim())
+      set({ messages: result.messages, error: null })
+    } catch (e) {
+      set({ error: messageOf(e) })
+      throw e
     }
   },
 
@@ -465,6 +507,24 @@ export const useApp = create<AppState>((set, get) => ({
       const result = await editTurnApi(workspace, id, turn, text)
       set({ messages: result.messages, error: null, retryInput: null })
       return { memoryStale: result.memoryStale }
+    } catch (e) {
+      set({ error: messageOf(e) })
+      throw e
+    }
+  },
+
+  /**
+   * 让 AI 只重写选中的那一小段；服务端定位、拼接并落盘，界面拿到新的消息列表。
+   * 定位失败或结果异常时后端不写盘，这里只把错误放进 store。
+   */
+  rewriteSelection: async (turn, selected, before, after, instruction) => {
+    const workspace = get().currentWorkspace
+    const id = get().currentId
+    if (!workspace || !id) throw new Error('还没有打开一场戏')
+    try {
+      const result = await rewriteTurnApi(workspace, id, turn, { selected, before, after, instruction })
+      set({ messages: result.messages, error: null, retryInput: null })
+      return { rewritten: result.rewritten, memoryStale: result.memoryStale }
     } catch (e) {
       set({ error: messageOf(e) })
       throw e
@@ -536,6 +596,24 @@ export const useApp = create<AppState>((set, get) => ({
       set({
         sessions: get().sessions.map((session) => (session.id === id ? meta : session)),
         meta: get().meta?.id === id ? meta : get().meta,
+        error: null,
+      })
+    } catch (e) {
+      set({ error: messageOf(e) })
+      throw e
+    }
+  },
+
+  /** 往这场戏的演员表里加一张卡；已经在场时后端幂等，这里照常返回。 */
+  addCast: async (cardId) => {
+    const workspace = get().currentWorkspace
+    const id = get().currentId
+    if (!workspace || !id) return
+    try {
+      const session = await addSessionCast(workspace, id, cardId)
+      set({
+        sessions: get().sessions.map((item) => (item.id === id ? session : item)),
+        meta: get().meta?.id === id ? session : get().meta,
         error: null,
       })
     } catch (e) {

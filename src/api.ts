@@ -85,11 +85,22 @@ export interface SessionCreateInput {
   perspective?: string
 }
 
+/** 后端返回的 `{ error }` 直接给用户看；不是 JSON 就退回状态码。 */
+function errorText(res: Response, body: string): string {
+  try {
+    const parsed = JSON.parse(body) as { error?: unknown }
+    if (typeof parsed.error === 'string' && parsed.error.trim()) return parsed.error
+  } catch {
+    // 不是 JSON，照原样给
+  }
+  return `${res.status} ${res.statusText}: ${body}`
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init)
   if (!res.ok) {
     const body = await res.text()
-    throw new Error(`${res.status} ${res.statusText}: ${body}`)
+    throw new Error(errorText(res, body))
   }
   return res.json() as Promise<T>
 }
@@ -159,8 +170,24 @@ export async function patchSession(
   return session
 }
 
-export async function deleteSession(workspace: string, id: string): Promise<void> {
-  await request<{ ok: boolean }>(
+/** 往这场戏的演员表里加一张卡；已经在场时不重复加。 */
+export async function addSessionCast(
+  workspace: string,
+  id: string,
+  cardId: string,
+): Promise<SessionMeta> {
+  const { session } = await request<{ session: SessionMeta }>(
+    `/api/sessions/${encodeURIComponent(id)}/cast?workspace=${encodeURIComponent(workspace)}`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cardId }),
+    },
+  )
+  return session
+}
+
+export async function deleteSession(workspace: string, id: string): Promise<void> {  await request<{ ok: boolean }>(
     `/api/sessions/${encodeURIComponent(id)}?workspace=${encodeURIComponent(workspace)}`,
     { method: 'DELETE' },
   )
@@ -224,16 +251,25 @@ export async function streamTurn(
   await readSse(res, onEvent)
 }
 
-/** 用同一大纲重写最后一回合；旧稿由服务端覆盖。 */
+/**
+ * 用同一大纲重写最后一回合；旧稿由服务端覆盖。
+ * instruction 是导演这次的重写要求，空串表示按原大纲再写一遍。
+ */
 export async function regenerateTurn(
   workspace: string,
   id: string,
+  instruction: string,
   onEvent: (event: TurnEvent) => void,
   signal: AbortSignal,
 ): Promise<void> {
   const res = await fetch(
     `/api/sessions/${encodeURIComponent(id)}/turns/regenerate?workspace=${encodeURIComponent(workspace)}`,
-    { method: 'POST', signal },
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ instruction }),
+      signal,
+    },
   )
   await readSse(res, onEvent)
 }
@@ -255,9 +291,45 @@ export async function editTurn(
   )
 }
 
-/** 删除最后一回合。 */
-export async function deleteTurn(
+/**
+ * 让 AI 只重写选中的那一小段。
+ * 定位由后端在原文里做：界面文本与磁盘原文的空白不同，前端算不出稳定 offset。
+ */
+export async function rewriteTurn(
   workspace: string,
+  id: string,
+  turn: number,
+  input: { selected: string; instruction: string; before: string; after: string },
+): Promise<{ rewritten: string; memoryStale: boolean; messages: MessageRecord[] }> {
+  return request<{ ok: boolean; rewritten: string; memoryStale: boolean; messages: MessageRecord[] }>(
+    `/api/sessions/${encodeURIComponent(id)}/turns/${turn}/rewrite?workspace=${encodeURIComponent(workspace)}`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    },
+  )
+}
+
+/** 单独为最后一回合再想一批后续选项；idea 是导演想去的方向，空串表示不限定。 */
+export async function generateTurnOptions(
+  workspace: string,
+  id: string,
+  turn: number,
+  idea = '',
+): Promise<{ options: string[]; messages: MessageRecord[] }> {
+  return request<{ options: string[]; messages: MessageRecord[] }>(
+    `/api/sessions/${encodeURIComponent(id)}/turns/${turn}/options?workspace=${encodeURIComponent(workspace)}`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ idea }),
+    },
+  )
+}
+
+/** 删除最后一回合。 */
+export async function deleteTurn(  workspace: string,
   id: string,
   turn: number,
 ): Promise<{ meta: SessionMeta; messages: MessageRecord[]; status: StatusView }> {

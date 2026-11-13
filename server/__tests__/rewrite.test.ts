@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import app from '../app'
-import { setLlmRunner } from '../lib/llm'
+import { setLlmRunner, type LlmParams } from '../lib/llm'
 import { memoryFile } from '../lib/memory'
 import { setOptionsRunner } from '../lib/options'
 import { readMessages, readMeta, sessionDir } from '../lib/session-fs'
@@ -14,9 +14,10 @@ let sessionId: string
 
 const q = (ws: string) => `?workspace=${encodeURIComponent(ws)}`
 
-function fakeLlm(script: Array<{ text?: string; fail?: string }>) {
+function fakeLlm(script: Array<{ text?: string; fail?: string }>, seen?: LlmParams[]) {
   let step = 0
-  return async function* () {
+  return async function* (params: LlmParams) {
+    seen?.push(params)
     const current = script[step] ?? { text: '（脚本结束）' }
     step += 1
     if (current.text) yield { type: 'delta' as const, text: current.text }
@@ -69,6 +70,14 @@ async function patchTurn(turn: number, text: string) {
 
 async function deleteTurn(turn: number) {
   return app.request(`/api/sessions/${sessionId}/turns/${turn}${q(root)}`, { method: 'DELETE' })
+}
+
+async function regenerate(instruction?: string) {
+  return app.request(`/api/sessions/${sessionId}/turns/regenerate${q(root)}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: instruction === undefined ? undefined : JSON.stringify({ instruction }),
+  })
 }
 
 describe('回合管理：删除 / 编辑 / 重新生成', () => {
@@ -159,6 +168,72 @@ describe('回合管理：删除 / 编辑 / 重新生成', () => {
       nextOptions: ['新方向一', '新方向二'],
     })
     expect(messages.filter((message) => message.role === 'director')).toHaveLength(1)
+    expect(readMeta(dirOf()).turn).toBe(1)
+  })
+
+  it('重新生成带一句要求：要求进 prompt，并落进情节记录', async () => {
+    const seen: LlmParams[] = []
+    setLlmRunner(fakeLlm([{ text: '旧稿。' }, { text: '新稿。' }], seen))
+    await (await postTurn('开场')).text()
+
+    const res = await regenerate('写得更紧张些，少解释、多动作。')
+    expect(res.status).toBe(200)
+    expect(parseSse(await res.text()).map((event) => event.type)).toEqual(['turn_start', 'delta', 'done'])
+
+    const request = seen.at(-1)
+    const user = request?.messages.find((message) => message.role === 'user')?.content ?? ''
+    expect(user).toContain('【重写要求】')
+    expect(user).toContain('写得更紧张些，少解释、多动作。')
+    // 重写要求排在本回合大纲之后，是模型最后看到的一段。
+    expect(user.indexOf('【重写要求】')).toBeGreaterThan(user.indexOf('【本回合大纲】'))
+
+    expect(readMessages(dirOf()).find((message) => message.role === 'narrative')).toMatchObject({
+      turn: 0,
+      text: '新稿。',
+      instruction: '写得更紧张些，少解释、多动作。',
+    })
+  })
+
+  it('不带要求重写：prompt 里没有要求段，记录里也不留字段', async () => {
+    const seen: LlmParams[] = []
+    setLlmRunner(fakeLlm([{ text: '旧稿。' }, { text: '新稿。' }], seen))
+    await (await postTurn('开场')).text()
+
+    const res = await regenerate()
+    expect(res.status).toBe(200)
+    await res.text()
+
+    const user = seen.at(-1)?.messages.find((message) => message.role === 'user')?.content ?? ''
+    expect(user).not.toContain('【重写要求】')
+    expect(readMessages(dirOf()).find((message) => message.role === 'narrative')).not.toHaveProperty(
+      'instruction',
+    )
+  })
+
+  it('重写要求过长返回 400，旧稿留在原地', async () => {
+    setLlmRunner(fakeLlm([{ text: '旧稿。' }]))
+    await (await postTurn('开场')).text()
+
+    const res = await regenerate('很'.repeat(501))
+    expect(res.status).toBe(400)
+    expect(readMessages(dirOf()).find((message) => message.role === 'narrative')).toMatchObject({
+      turn: 0,
+      text: '旧稿。',
+    })
+    expect(readMeta(dirOf()).turn).toBe(1)
+  })
+
+  it('重新生成失败时不写 instruction，失败的那条大纲仍可再试', async () => {
+    setLlmRunner(fakeLlm([{ text: '旧稿。' }, { fail: '上游 500' }]))
+    await (await postTurn('开场')).text()
+
+    const res = await regenerate('再来一次')
+    expect(res.status).toBe(200)
+    await res.text()
+
+    const narratives = readMessages(dirOf()).filter((message) => message.role === 'narrative')
+    expect(narratives).toHaveLength(0)
+    // 回合号本来就已经前进过，失败的重写不该再动它。
     expect(readMeta(dirOf()).turn).toBe(1)
   })
 

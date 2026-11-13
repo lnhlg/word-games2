@@ -1,6 +1,6 @@
 import { getLlmRunner } from './llm'
 import type { ChatMessage } from './prompt'
-import { MAX_STATUS_ITEMS, type AiStatusInput } from './status'
+import { MAX_STATUS_ITEMS, type AiStatusInput, type StatusValue } from './status'
 import type { StatusItem } from './session-fs'
 
 /**
@@ -30,26 +30,110 @@ export function setOptionsRunner(fn: ((recent: string) => Promise<string[]>) | n
 /** 一场戏之后最多给三条候选。 */
 export const OPTION_COUNT = 3
 
-function sliceJson(text: string): string | null {
-  const start = text.indexOf('{')
-  const end = text.lastIndexOf('}')
-  return start >= 0 && end > start ? text.slice(start, end + 1) : null
+/**
+ * 状态行给选项/状态那次调用看：`沈砚：好感度（35）、被怀疑（是）`。
+ * 自动 extras 与单独重生成选项共用同一份措辞。
+ */
+export function statusLinesOf(byName: Record<string, StatusValue[]>): string {
+  return Object.entries(byName)
+    .filter(([, values]) => values.length > 0)
+    .map(
+      ([name, values]) =>
+        `${name}：${values.map((value) => `${value.name}（${value.value || '未定'}）`).join('、')}`,
+    )
+    .join('\n')
 }
 
-/** 从模型输出里抠出 options 数组；格式不对就当没生成。 */
-export function parseOptions(text: string): string[] {
+function sliceJson(text: string): string | null {
+  const objectStart = text.indexOf('{')
+  const arrayStart = text.indexOf('[')
+  const start =
+    objectStart >= 0 && (arrayStart < 0 || objectStart < arrayStart) ? objectStart : arrayStart
+  if (start < 0) return null
+  const end = text.lastIndexOf(text[start] === '{' ? '}' : ']')
+  return end > start ? text.slice(start, end + 1) : null
+}
+
+/** 去掉选项首尾的引号/书名号；只在成对时剥，避免误伤正文里的对话。 */
+function stripOuterQuotes(value: string): string {
+  const pairs: Array<[string, string]> = [
+    ['"', '"'],
+    ['“', '”'],
+    ['「', '」'],
+    ['『', '』'],
+    ["'", "'"],
+  ]
+  for (const [open, close] of pairs) {
+    if (value.length > 2 && value.startsWith(open) && value.endsWith(close)) {
+      return value.slice(open.length, value.length - close.length).trim()
+    }
+  }
+  return value
+}
+
+function cleanOption(value: unknown): string {
+  return stripOuterQuotes(String(value).trim())
+}
+
+/** 模型按 JSON 输出时的解析：`{"options":[...]}` 与裸数组都认。 */
+function parseOptionsFromJson(text: string): string[] {
   const json = sliceJson(text)
   if (!json) return []
   try {
-    const parsed = JSON.parse(json) as { options?: unknown }
-    if (!Array.isArray(parsed.options)) return []
-    return parsed.options
-      .map((option) => String(option).trim())
+    const parsed = JSON.parse(json) as unknown
+    const raw = Array.isArray(parsed)
+      ? parsed
+      : typeof parsed === 'object' && parsed !== null
+        ? (parsed as { options?: unknown }).options
+        : null
+    if (!Array.isArray(raw)) return []
+    return raw
+      .map(cleanOption)
       .filter((option) => option.length > 0)
       .slice(0, OPTION_COUNT)
   } catch {
     return []
   }
+}
+
+const LINE_PREFIX = /^(?:[-*•·]|\d+[.、)）]|第[一二三]条[:：]?)\s*/
+
+/** 像一条选项的短句：太短是标题、太长是解释段落。 */
+function isPlausible(value: string): boolean {
+  return value.length >= 6 && value.length <= 80
+}
+
+/**
+ * 模型没按 JSON 输出时的兜底：优先收带编号/项目符号的行；
+ * 没有前缀时，只有整段恰好是几行并列短句才认，宁缺毋滥。
+ */
+function parseOptionsFromLines(text: string): string[] {
+  const lines = text
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('```'))
+
+  const prefixed = lines
+    .map((line) => (LINE_PREFIX.test(line) ? cleanOption(line.replace(LINE_PREFIX, '')) : ''))
+    .filter(isPlausible)
+  if (prefixed.length >= 2) return prefixed.slice(0, OPTION_COUNT)
+
+  const plain = lines
+    .filter((line) => !line.endsWith('：') && !line.endsWith(':'))
+    .map(cleanOption)
+    .filter(isPlausible)
+  return plain.length >= 3 ? plain.slice(0, OPTION_COUNT) : []
+}
+
+/**
+ * 从模型输出里抠出 options 数组；先按 JSON 解析，失败再按行兜底。
+ * JSON 可能被代码块或解释文字包住，也可能被截断。
+ */
+export function parseOptions(text: string): string[] {
+  const fromJson = parseOptionsFromJson(text)
+  if (fromJson.length) return fromJson
+  return parseOptionsFromLines(text)
 }
 
 type RawEntry = Record<string, unknown>
@@ -165,6 +249,116 @@ export async function generateTurnExtras(args: GenerateExtrasArgs): Promise<Turn
     return { options: [], status: {} }
   }
   return parseTurnExtras(text)
+}
+
+// —— 单独重生成后续选项：不写正文、不动状态，只换这一回合末尾的三条候选 ——
+
+const OPTIONS_PROMPT = `你是这场戏的分场编剧。读最后一回合的大纲、情节与角色此刻的状态，替导演想三条「接下来可以怎么演」的候选大纲。
+
+要求：
+- 每条是导演口吻的一句指令，10~30 字；必须从这一回合情节的结尾接着往下写，第一条尤其要贴着最后那个动作、那句话或那个悬念走，不要重写已经发生的事。
+- 三条方向彼此不同（冲突升级、新信息、关系变化、视角切换等）；不要写成同一件事的三种说法。
+- 若给出【导演的想法】，三条都朝这个想法展开；但不要违背已经发生的情节，也不要在一条选项里塞进太多转折。
+- 不写正文、不解释、不要编号前缀。
+- 只输出 JSON（不要用代码块或反引号包住，不要任何前后说明）：{"options":["第一条","第二条","第三条"]}`
+
+export interface NextOptionsArgs {
+  /** 最后一回合的导演大纲。 */
+  outline: string
+  /** 最后一回合的情节；用结尾一段，保证选项接得上。 */
+  passage: string
+  /** 每角色一行当前状态；空串表示这场戏没启用角色状态。 */
+  statusLines: string
+  /** 本场的叙述视角。 */
+  perspective: string
+  /** 这一回合已有的一批选项；重新生成时给模型看，要求换个方向。 */
+  previous?: string[]
+  /** 导演这次想往哪个方向走；空表示不限定。 */
+  idea?: string
+  model: string
+  baseUrl?: string
+  apiKey?: string
+}
+
+/** 只读末尾这么长，足够模型接住结尾，又不会把整回合塞进去。 */
+const OPTIONS_PASSAGE_CHARS = 1200
+
+/**
+ * 为最后一回合单独生成三条后续选项。
+ * 测试接缝复用 setTurnExtrasRunner / setOptionsRunner（只取其中的 options）。
+ * 失败或模型没给出可用结果时返回空数组，由路由决定报错。
+ */
+export async function generateNextOptions(args: NextOptionsArgs): Promise<string[]> {
+  if (override) {
+    const result = await override({ recent: args.passage, statusLines: args.statusLines })
+    return result.options
+  }
+
+  const previous = (args.previous ?? []).filter((option) => option.trim())
+  const idea = args.idea?.trim()
+  const user = [
+    `【本场视角】\n${args.perspective.trim() || '第三人称限知'}`,
+    `【最后一回合的大纲】\n${args.outline.trim() || '（没有记录）'}`,
+    `【最后一回合的情节（结尾）】\n${args.passage.slice(-OPTIONS_PASSAGE_CHARS)}`,
+    idea ? `【导演的想法】\n${idea}` : '',
+    args.statusLines ? `【角色此刻的状态】\n${args.statusLines}` : '',
+    previous.length
+      ? `【上一批选项（已经给过导演，这次换不同的方向）】\n${previous
+          .map((option, index) => `${index + 1}. ${option}`)
+          .join('\n')}`
+      : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+
+  const messages: ChatMessage[] = [
+    { role: 'system', content: OPTIONS_PROMPT },
+    { role: 'user', content: user },
+  ]
+
+  // 模型偶尔漏 JSON、或先写一段解释：换一次再试，比让导演直接看到失败强。
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    // 第二次把纠正话放在末尾，比原样重发更容易让模型照格式输出。
+    const attemptMessages =
+      attempt === 0
+        ? messages
+        : [
+            ...messages,
+            {
+              role: 'user' as const,
+              content:
+                '上一遍没有给出能解析的选项。这次只输出 JSON，不要解释、不要代码块：{"options":["第一条","第二条","第三条"]}',
+            },
+          ]
+    let text = ''
+    try {
+      text = await runOptionsModel(args, attemptMessages)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.warn(`[options] 生成选项失败（第 ${attempt + 1} 次）：${message}`)
+      continue
+    }
+    const options = parseOptions(text)
+    if (options.length) return options
+    console.warn(
+      `[options] 没解析出选项（第 ${attempt + 1} 次），原始输出：${text.slice(0, 400) || '（空）'}`,
+    )
+  }
+  return []
+}
+
+async function runOptionsModel(args: NextOptionsArgs, messages: ChatMessage[]): Promise<string> {
+  let text = ''
+  for await (const chunk of getLlmRunner()({
+    model: args.model,
+    baseUrl: args.baseUrl,
+    apiKey: args.apiKey,
+    messages,
+  })) {
+    if (chunk.type === 'delta' && chunk.text) text += chunk.text
+    if (chunk.type === 'done') break
+  }
+  return text
 }
 
 // —— 让 AI 为某个角色设计状态项（只给名称与说明，不给具体值）——

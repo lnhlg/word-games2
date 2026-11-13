@@ -43,6 +43,8 @@ export type MessageRecord =
       interrupted?: boolean
       /** 导演手动改过这段情节。 */
       edited?: boolean
+      /** 这一段是按导演的哪条重写要求生成的；没有要求时缺省。 */
+      instruction?: string
       /** 正文写完后生成的后续剧情选项。 */
       nextOptions?: string[]
     }
@@ -55,7 +57,7 @@ export function defaultModel(): string {
   return process.env.DEFAULT_MODEL || 'deepseek-chat'
 }
 
-const DEFAULT_AGENT = `# AGENT.md
+export const DEFAULT_AGENT = `# AGENT.md
 
 这场戏的全场通用指令，对全部参演角色生效。代码不会解析它的结构。
 
@@ -274,6 +276,8 @@ export function patchMeta(
     providerId?: string | null
     reasoningEffort?: Effort | null
     perspective?: string
+    /** 参演角色整份替换；追加走 sessions 路由的 /cast 接口。 */
+    cast?: string[]
   },
 ): SessionMeta {
   const meta = readMeta(dir)
@@ -294,6 +298,7 @@ export function patchMeta(
   if (patch.perspective !== undefined && patch.perspective.trim()) {
     meta.perspective = patch.perspective.trim()
   }
+  if (patch.cast !== undefined) meta.cast = patch.cast
   meta.updatedAt = new Date().toISOString()
   writeMeta(dir, meta)
   return meta

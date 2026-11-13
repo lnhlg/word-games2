@@ -3,7 +3,7 @@ import { buildMessages } from './prompt'
 import type { CharacterCard } from './character-card'
 import { getLlmRunner } from './llm'
 import { memoryBlock, rememberBatch, type MemoryRecord } from './memory'
-import { generateTurnExtras } from './options'
+import { generateTurnExtras, statusLinesOf } from './options'
 import { applyAiStatus, type StatusValue, type StatusView } from './status'
 import type { Effort, ReasoningParam } from './providers'
 
@@ -35,6 +35,8 @@ export interface RunTurnArgs {
   turn?: number
   /** 失败重试时复用已落盘的导演消息，不再追加一条。 */
   reuseOutline?: boolean
+  /** 重新生成时导演提的重写要求；写进 prompt 并落进这一回合的情节记录。 */
+  instruction?: string
   /** 本回合实际使用的模型与供应商凭据；缺省用 meta.model 与 .env。 */
   model?: string
   provider?: { baseUrl: string; apiKey: string } | null
@@ -49,17 +51,6 @@ export interface RunTurnArgs {
 
 function now(): string {
   return new Date().toISOString()
-}
-
-/** 状态行给选项/状态那次调用看：`沈砚：好感度（35）、被怀疑（是）`。 */
-function statusLinesOf(byName: Record<string, StatusValue[]>): string {
-  return Object.entries(byName)
-    .filter(([, values]) => values.length > 0)
-    .map(
-      ([name, values]) =>
-        `${name}：${values.map((value) => `${value.name}（${value.value || '未定'}）`).join('、')}`,
-    )
-    .join('\n')
 }
 
 /** 连接可能被中断/关闭，落盘优先，emit 失败不抛。 */
@@ -84,6 +75,8 @@ export async function runTurn(args: RunTurnArgs): Promise<void> {
   const { dir, meta, cast } = args
   const turn = args.turn ?? meta.turn
   const model = args.model ?? meta.model
+  /** 只在导演真的写了要求时落盘；空串不写，免得记录里多一个没用的字段。 */
+  const instruction = args.instruction?.trim() || undefined
 
   await args.emit({ type: 'turn_start', turn })
   if (!args.reuseOutline) {
@@ -98,6 +91,7 @@ export async function runTurn(args: RunTurnArgs): Promise<void> {
     memory: memoryBlock(args.memories),
     history: args.history,
     outline: args.outline,
+    instruction: args.instruction,
   })
 
   const llm = getLlmRunner()
@@ -123,7 +117,14 @@ export async function runTurn(args: RunTurnArgs): Promise<void> {
   } catch (error) {
     // 已收到的半截情节先落盘，并标明这是中断的回合。
     if (narrative) {
-      appendMessage(dir, { role: 'narrative', turn, at: now(), text: narrative, interrupted: true })
+      appendMessage(dir, {
+        role: 'narrative',
+        turn,
+        at: now(),
+        text: narrative,
+        interrupted: true,
+        ...(instruction ? { instruction } : {}),
+      })
     }
 
     if (isAborted(error, args.signal)) {
@@ -145,7 +146,13 @@ export async function runTurn(args: RunTurnArgs): Promise<void> {
     await args.emit({ type: 'delta', text: narrative })
   }
 
-  appendMessage(dir, { role: 'narrative', turn, at: now(), text: narrative })
+  appendMessage(dir, {
+    role: 'narrative',
+    turn,
+    at: now(),
+    text: narrative,
+    ...(instruction ? { instruction } : {}),
+  })
 
   const nextMeta: SessionMeta = { ...meta, turn: turn + 1, updatedAt: now() }
   writeMeta(dir, nextMeta)

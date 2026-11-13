@@ -49,6 +49,8 @@ export type MessageRecord =
       interrupted?: boolean
       /** 导演手动改过这段情节。 */
       edited?: boolean
+      /** 这一段是按导演的哪条重写要求生成的；没有要求时缺省。 */
+      instruction?: string
       /** 正文写完后生成的后续剧情选项。 */
       nextOptions?: string[]
     }

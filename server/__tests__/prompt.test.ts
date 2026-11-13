@@ -4,6 +4,7 @@ import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { resolveAgentMd } from '../lib/agent-md'
 import { buildMessages, CONTRACT, castBlock } from '../lib/prompt'
+import { DEFAULT_AGENT } from '../lib/session-fs'
 import type { CharacterCard } from '../lib/character-card'
 
 function card(name: string, overrides: Partial<CharacterCard['data']> = {}): CharacterCard {
@@ -85,6 +86,35 @@ describe('buildMessages 组装顺序', () => {
     expect([...positions].sort((a, b) => a - b)).toEqual(positions)
   })
 
+  it('user：重新生成的要求接在本回合大纲之后', () => {
+    const messages = buildMessages({
+      agentMd: '',
+      cast: [],
+      perspective: '第三人称限知',
+      memory: '',
+      history: [],
+      outline: '有人敲门。',
+      instruction: '写得更紧张，少解释。',
+    })
+    const user = messages[1].content ?? ''
+    const order = ['【本回合大纲】', '有人敲门。', '【重写要求】', '写得更紧张，少解释。']
+    const positions = order.map((part) => user.indexOf(part))
+    expect(positions.every((position) => position >= 0)).toBe(true)
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions)
+  })
+
+  it('user：没有重写要求时不出现这一段', () => {
+    const messages = buildMessages({
+      agentMd: '',
+      cast: [],
+      perspective: '第三人称限知',
+      memory: '',
+      history: [],
+      outline: '有人敲门。',
+      instruction: '   ',
+    })
+    expect(messages[1].content ?? '').not.toContain('【重写要求】')
+  })
   it('没有 agentMd 时 system 直接从演员表开始', () => {
     const messages = buildMessages({
       agentMd: '',
@@ -132,24 +162,65 @@ describe('buildMessages 组装顺序', () => {
 })
 
 describe('resolveAgentMd 优先级', () => {
-  it('<model>.md 存在时优先于 AGENT.md', () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), 'wg-agent-'))
+  /** 一对临时目录：workspace 是工作区，dir 是会话目录。 */
+  function tempDirs() {
+    return {
+      workspace: mkdtempSync(path.join(os.tmpdir(), 'wg-ws-')),
+      dir: mkdtempSync(path.join(os.tmpdir(), 'wg-agent-')),
+    }
+  }
+
+  function cleanup(...dirs: string[]) {
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
+  }
+
+  it('<model>.md 存在时优先于会话的 AGENT.md', () => {
+    const { workspace, dir } = tempDirs()
     writeFileSync(path.join(dir, 'AGENT.md'), '通用设定', 'utf8')
     writeFileSync(path.join(dir, 'deepseek-chat.md'), '模型专属设定', 'utf8')
-    expect(resolveAgentMd(dir, 'deepseek-chat')).toBe('模型专属设定')
-    rmSync(dir, { recursive: true, force: true })
+    expect(resolveAgentMd(dir, 'deepseek-chat', workspace)).toBe('模型专属设定')
+    cleanup(workspace, dir)
   })
 
-  it('没有 <model>.md 时用 AGENT.md', () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), 'wg-agent-'))
+  it('没有 <model>.md 时用会话的 AGENT.md', () => {
+    const { workspace, dir } = tempDirs()
     writeFileSync(path.join(dir, 'AGENT.md'), '通用设定', 'utf8')
-    expect(resolveAgentMd(dir, 'other-model')).toBe('通用设定')
-    rmSync(dir, { recursive: true, force: true })
+    expect(resolveAgentMd(dir, 'other-model', workspace)).toBe('通用设定')
+    cleanup(workspace, dir)
+  })
+
+  it('工作区根的 AGENTS.md 会作为默认指令注入', () => {
+    const { workspace, dir } = tempDirs()
+    writeFileSync(path.join(workspace, 'AGENTS.md'), '工作区的全场规则', 'utf8')
+    expect(resolveAgentMd(dir, 'any-model', workspace)).toBe('工作区的全场规则')
+    cleanup(workspace, dir)
+  })
+
+  it('工作区也认单数的 AGENT.md', () => {
+    const { workspace, dir } = tempDirs()
+    writeFileSync(path.join(workspace, 'AGENT.md'), '工作区规则', 'utf8')
+    expect(resolveAgentMd(dir, 'any-model', workspace)).toBe('工作区规则')
+    cleanup(workspace, dir)
+  })
+
+  it('工作区规则在前，本场规则追加在后', () => {
+    const { workspace, dir } = tempDirs()
+    writeFileSync(path.join(workspace, 'AGENTS.md'), '工作区规则', 'utf8')
+    writeFileSync(path.join(dir, 'AGENT.md'), '本场规则', 'utf8')
+    expect(resolveAgentMd(dir, 'any-model', workspace)).toBe('工作区规则\n\n本场规则')
+    cleanup(workspace, dir)
+  })
+
+  it('会话里的默认模板不算指令', () => {
+    const { workspace, dir } = tempDirs()
+    writeFileSync(path.join(dir, 'AGENT.md'), DEFAULT_AGENT, 'utf8')
+    expect(resolveAgentMd(dir, 'any-model', workspace)).toBe('')
+    cleanup(workspace, dir)
   })
 
   it('两个都不存在时返回空串', () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), 'wg-agent-'))
-    expect(resolveAgentMd(dir, 'any-model')).toBe('')
-    rmSync(dir, { recursive: true, force: true })
+    const { workspace, dir } = tempDirs()
+    expect(resolveAgentMd(dir, 'any-model', workspace)).toBe('')
+    cleanup(workspace, dir)
   })
 })
